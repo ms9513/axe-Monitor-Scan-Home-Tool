@@ -2411,7 +2411,7 @@
     renderBody(body, lastRenderedData, updateFilterButtonLabel, footer, prevState);
     const refreshedPanel = getActivePanelElement(body);
     accordionStateByTab[currentTabKey] = captureAccordionState(refreshedPanel || body) || {};
-    if (currentTabKey === 'pages' && pageImpactFilterState.button) {
+    if ((currentTabKey === 'pages' || currentTabKey === 'issues') && pageImpactFilterState.button) {
       requestAnimationFrame(() => {
         if (pageImpactFilterState.button) {
           pageImpactFilterState.button.focus();
@@ -7535,7 +7535,8 @@
 
     const appendSectionsToPanel = (panel, sections) => {
       const isPagesTab = pageContext === 'scans' && panel?.dataset?.tabKey === 'pages';
-      if (isPagesTab) {
+      const isIssuesTab = pageContext === 'scans' && panel?.dataset?.tabKey === 'issues';
+      if (isPagesTab || isIssuesTab) {
         const filterBlock = buildPageImpactFilterControls();
         if (filterBlock) panel.appendChild(filterBlock);
       }
