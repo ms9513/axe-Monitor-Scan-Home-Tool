@@ -6393,6 +6393,79 @@
         });
         table.appendChild(tbody);
         appendTableWithDownload(details, table, { filenameBase: contextPrefix || title.toLowerCase() });
+
+        // Add "Download all scans" button exporting every scan across all groups with Domain column
+        const toolbar = document.createElement('div');
+        toolbar.className = 'a11y-table-toolbar';
+        const dlBtn = document.createElement('button');
+        dlBtn.type = 'button';
+        dlBtn.className = 'a11y-table-download-btn';
+        dlBtn.textContent = 'Download all scans';
+        dlBtn.addEventListener('click', async () => {
+          try {
+            // Refresh to get current filtered rows
+            const latest = await refreshMainView({ preserveState: true });
+            const sourceRows = latest.filtered || [];
+            // Build a set of identifiers for rows included in entries to avoid domain mismatch
+            const identifiersByDomain = new Map();
+            entries.forEach(entry => {
+              const ids = new Set(entry.rows.map(r => r.url || r.name));
+              identifiersByDomain.set(entry.label, ids);
+            });
+            // Collect scans and attach Domain column (group label)
+            const all = [];
+            sourceRows.forEach(r => {
+              // Determine which group (domain) this row belongs to based on entries
+              let domainLabel = null;
+              for (const [label, ids] of identifiersByDomain.entries()) {
+                if (ids.has(r.url || r.name)) {
+                  domainLabel = label;
+                  break;
+                }
+              }
+              // Only include rows that are part of the grouped entries
+              if (!domainLabel) return;
+              all.push({
+                Domain: domainLabel,
+                name: r.name || '',
+                type: r.type || '',
+                domain: r.domain || '',
+                status: r.statusText || '',
+                score: Number.isFinite(r.scoreVal) ? r.scoreVal : '',
+                critical: r.crit != null ? r.crit : '',
+                serious: r.serious != null ? r.serious : '',
+                moderate: r.moderate != null ? r.moderate : '',
+                minor: r.minor != null ? r.minor : '',
+                total: r.total != null ? r.total : '',
+                pages: r.pages != null ? r.pages : '',
+                lastRun: r.lastRun ? r.lastRun.toISOString() : '',
+                url: r.url || ''
+              });
+            });
+
+            downloadObjectCsv(all, [
+              { key: 'Domain', label: 'Domain' },
+              { key: 'name', label: 'Scan Name' },
+              { key: 'type', label: 'Type' },
+              { key: 'domain', label: 'Domain (raw)' },
+              { key: 'status', label: 'Status' },
+              { key: 'score', label: 'Score' },
+              { key: 'critical', label: 'Critical' },
+              { key: 'serious', label: 'Serious' },
+              { key: 'moderate', label: 'Moderate' },
+              { key: 'minor', label: 'Minor' },
+              { key: 'total', label: 'Total Issues' },
+              { key: 'pages', label: 'Pages' },
+              { key: 'lastRun', label: 'Last Run' },
+              { key: 'url', label: 'URL' }
+            ], `${sanitizeFilename(contextPrefix || title)}-all-scans`);
+          } catch (err) {
+            console.error(err);
+            alert('Unable to download all scans.');
+          }
+        });
+        toolbar.appendChild(dlBtn);
+        details.appendChild(toolbar);
       }
       pushSection('score', details);
     };
