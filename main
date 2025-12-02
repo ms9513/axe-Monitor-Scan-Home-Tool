@@ -6395,7 +6395,7 @@
         table.appendChild(tbody);
         appendTableWithDownload(details, table, { filenameBase: contextPrefix || title.toLowerCase() });
 
-        // Add "Download all scans" button exporting every scan across all groups with Domain column
+        // Add "Download all scans" button exporting every scan across all groups with contextual column (Domain/Website)
         const toolbar = document.createElement('div');
         toolbar.className = 'a11y-table-toolbar';
         const dlBtn = document.createElement('button');
@@ -6427,7 +6427,7 @@
               // Only include rows that are part of the grouped entries
               if (!domainLabel) return;
               all.push({
-                Domain: domainLabel,
+                ContextGroup: domainLabel,
                 name: r.name || '',
                 type: r.type || '',
                 domain: r.domain || '',
@@ -6444,8 +6444,9 @@
               });
             });
 
+            const groupColumnLabelCsv = /website/i.test(contextPrefix || title) ? 'Website' : 'Domain';
             downloadObjectCsv(all, [
-              { key: 'Domain', label: 'Domain' },
+              { key: 'ContextGroup', label: groupColumnLabelCsv },
               { key: 'name', label: 'Scan Name' },
               { key: 'type', label: 'Type' },
               { key: 'domain', label: 'Domain (raw)' },
