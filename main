@@ -6378,11 +6378,12 @@
           tr.appendChild(avgCell);
 
           const countCell = document.createElement('td');
-          const rowSet = new Set(entry.rows);
+          // Create a set of scan identifiers (URLs or names) instead of row objects
+          const scanIdentifiers = new Set(entry.rows.map(r => r.url || r.name));
           const btn = makeCountButton(
             entry.count,
             `${entry.label} - ${contextPrefix}`,
-            r => rowSet.has(r),
+            r => scanIdentifiers.has(r.url || r.name),
             { sortMode: 'scoreThenName' }
           );
           countCell.appendChild(btn);
