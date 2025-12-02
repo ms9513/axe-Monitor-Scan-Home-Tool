@@ -2023,6 +2023,34 @@
     return getRowCritical(row) + getRowSerious(row);
   }
 
+  // Issue impact counts (per-scan issues, not pages)
+  function getIssueImpactCounts(row) {
+    const getValue = value => Math.max(0, coerceNumber(value, 0));
+    const pick = (target, key) => (target && target[key] != null) ? target[key] : 0;
+    return {
+      critical: getValue(pick(row, 'crit')),
+      serious: getValue(pick(row, 'serious')),
+      moderate: getValue(pick(row, 'moderate')),
+      minor: getValue(pick(row, 'minor'))
+    };
+  }
+
+  function getFilteredIssueImpactCounts(row) {
+    const counts = getIssueImpactCounts(row);
+    const active = getActivePageImpactSet();
+    return {
+      critical: active.has('critical') ? counts.critical : 0,
+      serious: active.has('serious') ? counts.serious : 0,
+      moderate: active.has('moderate') ? counts.moderate : 0,
+      minor: active.has('minor') ? counts.minor : 0
+    };
+  }
+
+  function getIssueTotal(row) {
+    const c = getFilteredIssueImpactCounts(row);
+    return c.critical + c.serious + c.moderate + c.minor;
+  }
+
   function getPageImpactCounts(row) {
     const getValue = value => Math.max(0, coerceNumber(value, 0));
     const pick = (target, keys) => {
@@ -5347,13 +5375,15 @@
 
       if (
         r.statusKey === 'Complete' &&
-        typeof r.impactTotal === 'number' &&
         Number.isFinite(r.scoreVal)
       ) {
-        if (!impactIssuesByType[r.type]) {
-          impactIssuesByType[r.type] = initImpactBuckets(impactIssueBandOrder);
+        const selectedIssueTotal = getIssueTotal(r);
+        if (selectedIssueTotal > 0) {
+          if (!impactIssuesByType[r.type]) {
+            impactIssuesByType[r.type] = initImpactBuckets(impactIssueBandOrder);
+          }
+          impactIssuesByType[r.type][getImpactBandIssues(selectedIssueTotal)]++;
         }
-        impactIssuesByType[r.type][getImpactBandIssues(r.impactTotal)]++;
       }
 
       if (
@@ -6035,7 +6065,7 @@
     table.className = 'a11y-scan-report-table';
     const thead = document.createElement('thead');
     const hr = document.createElement('tr');
-    ['Scan','Critical','Serious','Total Critical + Serious','Total of all issues'].forEach(t => {
+    ['Scan','Critical','Serious','Total of selected impacts','Total of all issues'].forEach(t => {
       const th = document.createElement('th');
       th.textContent = t;
       th.setAttribute('scope','col');
@@ -6047,6 +6077,7 @@
     const tbody = document.createElement('tbody');
     let critTotal = 0;
     let seriousTotal = 0;
+    let selectedTotal = 0;
     let issuesTotal = 0;
 
     rows.forEach(scan => {
@@ -6056,25 +6087,27 @@
       nameCell.appendChild(createScanLink(scan));
       tr.appendChild(nameCell);
 
-      const crit = getRowCritical(scan);
-      const serious = getRowSerious(scan);
-      const csTotal = crit + serious;
+      const filtered = getFilteredIssueImpactCounts(scan);
+      const crit = filtered.critical;
+      const serious = filtered.serious;
+      const selTotal = crit + serious + filtered.moderate + filtered.minor;
       const allIssues = getRowTotalIssues(scan);
       critTotal += crit;
       seriousTotal += serious;
+      selectedTotal += selTotal;
       issuesTotal += allIssues;
 
       const critCell = document.createElement('td');
-      critCell.textContent = crit ? String(crit) : '0';
+      critCell.textContent = String(crit);
       tr.appendChild(critCell);
 
       const seriousCell = document.createElement('td');
-      seriousCell.textContent = serious ? String(serious) : '0';
+      seriousCell.textContent = String(serious);
       tr.appendChild(seriousCell);
 
-      const csCell = document.createElement('td');
-      csCell.textContent = String(csTotal);
-      tr.appendChild(csCell);
+      const selCell = document.createElement('td');
+      selCell.textContent = String(selTotal);
+      tr.appendChild(selCell);
 
       const totalCell = document.createElement('td');
       totalCell.textContent = String(allIssues);
@@ -6099,9 +6132,9 @@
       seriousCell.textContent = String(seriousTotal);
       tr.appendChild(seriousCell);
 
-      const csCell = document.createElement('td');
-      csCell.textContent = String(critTotal + seriousTotal);
-      tr.appendChild(csCell);
+      const selCell = document.createElement('td');
+      selCell.textContent = String(selectedTotal);
+      tr.appendChild(selCell);
 
       const totalCell = document.createElement('td');
       totalCell.textContent = String(issuesTotal);
@@ -6634,7 +6667,7 @@
     {
       const impactBandOrder = impactIssueBandOrder;
       const impactMap = impactIssuesByType;
-      const details = makeDetails('Issue impact bands');
+      const details = makeDetails(`Issue impact bands${impactHeadingSuffix}`);
       const types = Object.keys(impactMap).sort();
       const bandDownloadRows = [];
       if (!types.length) {
@@ -6757,7 +6790,7 @@
 
     // Critical + Serious counts by type
     {
-      const details = makeDetails('Scan Type - Critical + Serious issue counts');
+      const details = makeDetails(`Scan Type - Issue counts${impactHeadingSuffix}`);
       const grouped = {};
       filtered
         .filter(r => r.statusKey === 'Complete' && (typeof r.crit === 'number' || typeof r.serious === 'number' || typeof r.total === 'number'))
@@ -6786,7 +6819,7 @@
 
     // Critical + Serious counts by domain (per scan rows + totals)
     {
-      const details = makeDetails('Domain - Critical + Serious issue counts');
+      const details = makeDetails(`Domain - Issue counts${impactHeadingSuffix}`);
       if (!domainHierarchy.length) {
         const p = document.createElement('p');
         p.textContent = 'No domain information available.';
