@@ -6608,10 +6608,16 @@
     }
 
     {
-      const websiteGroups = Array.from(domainAggregates.values()).map(agg => ({
-        label: agg.domain,
-        rows: agg.rows
-      }));
+      // Group by top-level website (first token before ' - ' in the scan name)
+      const websiteMap = new Map();
+      filtered.forEach(r => {
+        const raw = r.name || '';
+        const top = raw.includes(' - ') ? raw.split(' - ')[0].trim() : raw.trim();
+        const key = top || (r.domain || 'Other');
+        if (!websiteMap.has(key)) websiteMap.set(key, []);
+        websiteMap.get(key).push(r);
+      });
+      const websiteGroups = Array.from(websiteMap.entries()).map(([label, rows]) => ({ label, rows }));
       appendAverageScoreSection('Avg Score by website', websiteGroups, 'Avg Score by website');
     }
 
