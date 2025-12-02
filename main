@@ -5861,7 +5861,7 @@
     return table;
   }
 
-  function appendBandDownloadButton(target, rows, { filenameBase, label, columns } = {}) {
+  function appendBandDownloadButton(target, rows, { filenameBase, label, columns, bandOrder, rowFilter, groupLabel } = {}) {
     if (!target || !Array.isArray(rows) || !rows.length) return;
     const toolbar = document.createElement('div');
     toolbar.className = 'a11y-table-toolbar';
@@ -5869,14 +5869,70 @@
     btn.type = 'button';
     btn.className = 'a11y-table-download-btn';
     btn.textContent = label || 'Download all band data';
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       try {
-        downloadObjectCsv(rows, columns || [
-          { key: 'group', label: 'Group' },
-          { key: 'band', label: 'Band' },
-          { key: 'count', label: 'Count' },
-          { key: 'percent', label: 'Percent' }
-        ], filenameBase || 'band-data');
+        // If bandOrder and rowFilter are provided, export detailed scan data
+        if (bandOrder && typeof rowFilter === 'function') {
+          const data = await refreshMainView({ preserveState: true });
+          const sourceRows = data.filtered || [];
+          const allBandScans = [];
+          
+          // Collect all scans from each band
+          // bandOrder can be either an array of band labels or array of {type, band} objects
+          bandOrder.forEach(bandItem => {
+            const bandScans = sourceRows.filter(r => rowFilter(r, bandItem));
+            bandScans.forEach(scan => {
+              const bandLabel = typeof bandItem === 'string' ? bandItem : bandItem.band;
+              const groupLabelValue = typeof bandItem === 'string' ? 
+                (groupLabel || '') : 
+                (bandItem.type || groupLabel || '');
+              
+              allBandScans.push({
+                band: bandLabel,
+                group: groupLabelValue,
+                name: scan.name || '',
+                type: scan.type || '',
+                domain: scan.domain || '',
+                status: scan.statusText || '',
+                score: scan.scoreVal != null ? scan.scoreVal : '',
+                critical: scan.crit != null ? scan.crit : '',
+                serious: scan.serious != null ? scan.serious : '',
+                moderate: scan.moderate != null ? scan.moderate : '',
+                minor: scan.minor != null ? scan.minor : '',
+                total: scan.total != null ? scan.total : '',
+                pages: scan.pages != null ? scan.pages : '',
+                lastRun: scan.lastRun ? scan.lastRun.toISOString() : '',
+                url: scan.url || ''
+              });
+            });
+          });
+          
+          downloadObjectCsv(allBandScans, [
+            { key: 'band', label: 'Band' },
+            { key: 'group', label: 'Group' },
+            { key: 'name', label: 'Scan Name' },
+            { key: 'type', label: 'Type' },
+            { key: 'domain', label: 'Domain' },
+            { key: 'status', label: 'Status' },
+            { key: 'score', label: 'Score' },
+            { key: 'critical', label: 'Critical' },
+            { key: 'serious', label: 'Serious' },
+            { key: 'moderate', label: 'Moderate' },
+            { key: 'minor', label: 'Minor' },
+            { key: 'total', label: 'Total Issues' },
+            { key: 'pages', label: 'Pages' },
+            { key: 'lastRun', label: 'Last Run' },
+            { key: 'url', label: 'URL' }
+          ], filenameBase || 'band-data-detailed');
+        } else {
+          // Fallback to summary data
+          downloadObjectCsv(rows, columns || [
+            { key: 'group', label: 'Group' },
+            { key: 'band', label: 'Band' },
+            { key: 'count', label: 'Count' },
+            { key: 'percent', label: 'Percent' }
+          ], filenameBase || 'band-data');
+        }
       } catch (err) {
         console.error(err);
         alert('Unable to download band data.');
@@ -6405,6 +6461,9 @@
       if (summaryRows.length) {
         appendBandDownloadButton(details, summaryRows, {
           filenameBase: 'score-summary-bands-all',
+          bandOrder: scoreBandOrder,
+          rowFilter: (r, band) => r.scoreBucket === band,
+          groupLabel: 'All scans',
           columns: [
             { key: 'group', label: 'Group' },
             { key: 'band', label: 'Band' },
@@ -6426,6 +6485,7 @@
         details.appendChild(p);
       } else {
         const bandDownloadRows = [];
+        const allTypeBandFilters = []; // Store filters for each type-band combination
         typeKeys.forEach(type => {
           const h3 = document.createElement('h3');
           h3.textContent = type;
@@ -6441,11 +6501,18 @@
             `Score summary by type - ${type}`,
             { filenameBase: `score-bands-${sanitizeFilename(type)}`, groupLabel: type }
           );
-          rows.forEach(row => bandDownloadRows.push(row));
+          rows.forEach(row => {
+            bandDownloadRows.push(row);
+            // Store the type and band for later filtering
+            allTypeBandFilters.push({ type: type, band: row.band });
+          });
         });
         if (bandDownloadRows.length) {
           appendBandDownloadButton(details, bandDownloadRows, {
             filenameBase: 'score-bands-by-type',
+            bandOrder: allTypeBandFilters,
+            rowFilter: (r, typeBand) => r.type === typeBand.type && r.scoreBucket === typeBand.band,
+            groupLabel: 'By Type',
             columns: [
               { key: 'group', label: 'Scan type' },
               { key: 'band', label: 'Band' },
@@ -6565,8 +6632,29 @@
         note.style.fontSize = '11px';
         note.textContent = 'Note: Impact bands include only Complete scans with Critical + Serious values and valid percentage scores. Queued and Cancelled scans are excluded.';
         details.appendChild(note);
+        
+        // Create filters for all type-band combinations
+        const allTypeBandFilters = [];
+        types.forEach(type => {
+          impactBandOrder.forEach(band => {
+            const bands = impactMap[type] || {};
+            const count = bands[band] || 0;
+            if (count > 0) {
+              allTypeBandFilters.push({ type: type, band: band });
+            }
+          });
+        });
+        
         appendBandDownloadButton(details, bandDownloadRows, {
           filenameBase: 'issue-impact-bands',
+          bandOrder: allTypeBandFilters,
+          rowFilter: (row, typeBand) =>
+            row.type === typeBand.type &&
+            row.statusKey === 'Complete' &&
+            typeof row.impactTotal === 'number' &&
+            Number.isFinite(row.scoreVal) &&
+            getImpactBandIssues(row.impactTotal) === typeBand.band,
+          groupLabel: 'Issue Impact',
           columns: [
             { key: 'group', label: 'Scan type' },
             { key: 'band', label: 'Band' },
@@ -6766,8 +6854,28 @@
         note.style.fontSize = '11px';
         note.textContent = `Note: Page impact bands include only Complete scans with available pages for the selected impacts (${impactFilterLabel}). Queued and Cancelled scans are excluded.`;
         details.appendChild(note);
+        
+        // Create filters for all type-band combinations
+        const allTypeBandFilters = [];
+        types.forEach(type => {
+          impactPageBandOrder.forEach(band => {
+            const rowsForType = (pageRowsByType[type] || []).filter(row => getPageTotal(row) > 0);
+            const matchingRows = rowsForType.filter(row => getImpactBandPages(getPageTotal(row)) === band);
+            if (matchingRows.length > 0) {
+              allTypeBandFilters.push({ type: type, band: band });
+            }
+          });
+        });
+        
         appendBandDownloadButton(details, bandDownloadRows, {
           filenameBase: 'page-impact-bands',
+          bandOrder: allTypeBandFilters,
+          rowFilter: (row, typeBand) =>
+            row.type === typeBand.type &&
+            row.statusKey === 'Complete' &&
+            getPageTotal(row) > 0 &&
+            getImpactBandPages(getPageTotal(row)) === typeBand.band,
+          groupLabel: 'Page Impact',
           columns: [
             { key: 'group', label: 'Scan type' },
             { key: 'band', label: 'Band' },
