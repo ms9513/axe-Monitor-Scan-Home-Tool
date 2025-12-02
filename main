@@ -6608,12 +6608,19 @@
     }
 
     {
-      // Group by top-level website (first token before ' - ' in the scan name)
+      // Group by website: remove trailing scan type tokens (Desktop/Mobile/PDF) from the name,
+      // and use the remaining full prefix as the website label.
+      const scanTypes = new Set(['Desktop','Mobile','PDF']);
       const websiteMap = new Map();
       filtered.forEach(r => {
-        const raw = r.name || '';
-        const top = raw.includes(' - ') ? raw.split(' - ')[0].trim() : raw.trim();
-        const key = top || (r.domain || 'Other');
+        const raw = (r.name || '').trim();
+        let tokens = raw.split(' - ').map(s => s.trim()).filter(Boolean);
+        if (tokens.length === 0) tokens = [(r.domain || 'Other')];
+        // If the last token is a known scan type, drop it
+        if (tokens.length > 1 && scanTypes.has(tokens[tokens.length - 1])) {
+          tokens = tokens.slice(0, -1);
+        }
+        const key = tokens.join(' - ') || (r.domain || 'Other');
         if (!websiteMap.has(key)) websiteMap.set(key, []);
         websiteMap.get(key).push(r);
       });
