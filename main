@@ -5378,14 +5378,9 @@
       avgPerHour12 = recent.length / spanHours;
     }
 
-    // Recent completion windows: dynamic granularity
+    // Recent completion windows: fixed time ranges
     const windowRows = [];
     if (completeRunTimes.length) {
-      const earliest = new Date(Math.min.apply(null, completeRunTimes.map(d=>d.getTime())));
-      const spanMs = nowMs - earliest.getTime();
-      const spanHours = spanMs / msPerHour;
-      const spanDays = spanHours / 24;
-
       function countWithin(msWindow) {
         return completeRunTimes.reduce((acc, dt) => {
           const diff = nowMs - dt.getTime();
@@ -5393,53 +5388,25 @@
         }, 0);
       }
 
-      const addWindow = (label, msWindow) => {
-        if (!label || msWindow <= 0) return;
-        windowRows.push({ label, count: countWithin(msWindow) });
-      };
-
-      const pushWindow = (label, windowMs) => {
+      const pushWindow = (label, windowMs, minMs) => {
         if (!label || windowMs <= 0) return;
-        addWindow(label, windowMs);
-        windowRows[windowRows.length - 1].windowMs = windowMs;
+        const count = minMs !== undefined ? 
+          completeRunTimes.reduce((acc, dt) => {
+            const diff = nowMs - dt.getTime();
+            return (diff >= 0 && diff > minMs && diff <= windowMs) ? acc + 1 : acc;
+          }, 0) : 
+          countWithin(windowMs);
+        windowRows.push({ label, count, windowMs, minMs });
       };
 
-      if (spanHours <= 24) {
-        [1,3,6,12,24].forEach(h => {
-          const windowMs = h * msPerHour;
-          if (windowMs <= spanMs + msPerHour) {
-            const label = h === 1 ? 'Last 1 hour' : `Last ${h} hours`;
-            pushWindow(label, windowMs);
-          }
-        });
-      } else if (spanDays <= 7) {
-        pushWindow('Today (last 24 hours)', msPerDay);
-        pushWindow('Last 3 days', 3 * msPerDay);
-        pushWindow('Last 7 days', 7 * msPerDay);
-      } else if (spanDays <= 35) {
-        pushWindow('This week (7 days)', 7 * msPerDay);
-        pushWindow('Last 2 weeks', 14 * msPerDay);
-        pushWindow('Last 3 weeks', 21 * msPerDay);
-        pushWindow('Last 4 weeks', 28 * msPerDay);
-      } else if (spanDays <= 365) {
-        [1,3,6,9,12].forEach(m => {
-          const ms = m * 30 * msPerDay;
-          if (ms <= spanMs * 1.05) {
-            const label = m === 1 ? 'Last 1 month' : `Last ${m} months`;
-            pushWindow(label, ms);
-          }
-        });
-      } else {
-        const maxYears = Math.ceil(spanDays / 365);
-        const baseYears = [1,2,3,5,10].filter(y => y <= maxYears);
-        if (!baseYears.length || baseYears[baseYears.length - 1] !== maxYears) {
-          baseYears.push(maxYears);
-        }
-        baseYears.forEach(y => {
-          const ms = y * 365 * msPerDay;
-          pushWindow(y === 1 ? 'Last 1 year' : `Last ${y} years`, ms);
-        });
-      }
+      // Fixed time ranges as requested
+      pushWindow('Last 24 hours', msPerDay);
+      pushWindow('Last 7 days', 7 * msPerDay);
+      pushWindow('Last 30 days', 30 * msPerDay);
+      pushWindow('1-2 months', 60 * msPerDay, 30 * msPerDay);
+      pushWindow('2-4 months', 120 * msPerDay, 60 * msPerDay);
+      pushWindow('4-6 months', 180 * msPerDay, 120 * msPerDay);
+      pushWindow('6+ months', Infinity, 180 * msPerDay);
     }
 
     const typeOptions = Array.from(new Set(rows.map(r => r.type))).sort();
@@ -6905,10 +6872,17 @@
           const btn = makeCountButton(
             w.count,
             `${w.label} - Recently completed scans`,
-            row =>
-              row.statusKey === 'Complete' &&
-              row.lastRun &&
-              (nowMs - row.lastRun.getTime()) <= (w.windowMs || 0),
+            row => {
+              if (row.statusKey !== 'Complete' || !row.lastRun) return false;
+              const diff = nowMs - row.lastRun.getTime();
+              if (w.minMs !== undefined) {
+                // Range-based window (e.g., "1-2 months")
+                return diff > w.minMs && diff <= w.windowMs;
+              } else {
+                // "Last X" window (e.g., "Last 24 hours")
+                return diff >= 0 && diff <= (w.windowMs || 0);
+              }
+            },
             { sortMode: 'recent' }
           );
           t2.appendChild(btn);
