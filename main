@@ -6356,7 +6356,8 @@
         table.className = 'a11y-scan-report-table';
         const thead = document.createElement('thead');
         const hr = document.createElement('tr');
-        ['Group','Average score','Scan count'].forEach(t => {
+        const groupColumnLabel = /website/i.test(contextPrefix || title) ? 'Website' : 'Domain';
+        [groupColumnLabel,'Average score','Scan count'].forEach(t => {
           const th = document.createElement('th');
           th.textContent = t;
           th.setAttribute('scope','col');
