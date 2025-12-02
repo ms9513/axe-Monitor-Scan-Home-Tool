@@ -6063,20 +6063,42 @@
   function buildScanMetricsTable(rows, { includeSumRow = false } = {}) {
     const table = document.createElement('table');
     table.className = 'a11y-scan-report-table';
+    
+    // Get active impact keys to determine which columns to show
+    const activeImpacts = getActivePageImpactKeys();
+    const impactColumns = pageImpactFilterOptions.filter(opt => activeImpacts.includes(opt.key));
+    
     const thead = document.createElement('thead');
     const hr = document.createElement('tr');
-    ['Scan','Critical','Serious','Total of selected impacts','Total of all issues'].forEach(t => {
+    
+    // Scan name column
+    const scanTh = document.createElement('th');
+    scanTh.textContent = 'Scan';
+    scanTh.setAttribute('scope','col');
+    hr.appendChild(scanTh);
+    
+    // Individual impact columns (only active ones)
+    impactColumns.forEach(impact => {
+      const th = document.createElement('th');
+      th.textContent = impact.label;
+      th.setAttribute('scope','col');
+      hr.appendChild(th);
+    });
+    
+    // Summary columns
+    ['Total of selected impacts','Total of all issues'].forEach(t => {
       const th = document.createElement('th');
       th.textContent = t;
       th.setAttribute('scope','col');
       hr.appendChild(th);
     });
+    
     thead.appendChild(hr);
     table.appendChild(thead);
 
     const tbody = document.createElement('tbody');
-    let critTotal = 0;
-    let seriousTotal = 0;
+    const impactTotals = {};
+    impactColumns.forEach(impact => { impactTotals[impact.key] = 0; });
     let selectedTotal = 0;
     let issuesTotal = 0;
 
@@ -6088,22 +6110,22 @@
       tr.appendChild(nameCell);
 
       const filtered = getFilteredIssueImpactCounts(scan);
-      const crit = filtered.critical;
-      const serious = filtered.serious;
-      const selTotal = crit + serious + filtered.moderate + filtered.minor;
+      let selTotal = 0;
+      
+      // Add cells for each active impact
+      impactColumns.forEach(impact => {
+        const count = filtered[impact.key] || 0;
+        impactTotals[impact.key] += count;
+        selTotal += count;
+        
+        const cell = document.createElement('td');
+        cell.textContent = String(count);
+        tr.appendChild(cell);
+      });
+      
       const allIssues = getRowTotalIssues(scan);
-      critTotal += crit;
-      seriousTotal += serious;
       selectedTotal += selTotal;
       issuesTotal += allIssues;
-
-      const critCell = document.createElement('td');
-      critCell.textContent = String(crit);
-      tr.appendChild(critCell);
-
-      const seriousCell = document.createElement('td');
-      seriousCell.textContent = String(serious);
-      tr.appendChild(seriousCell);
 
       const selCell = document.createElement('td');
       selCell.textContent = String(selTotal);
@@ -6124,13 +6146,12 @@
       labelCell.textContent = 'Total';
       tr.appendChild(labelCell);
 
-      const critCell = document.createElement('td');
-      critCell.textContent = String(critTotal);
-      tr.appendChild(critCell);
-
-      const seriousCell = document.createElement('td');
-      seriousCell.textContent = String(seriousTotal);
-      tr.appendChild(seriousCell);
+      // Add total cells for each active impact
+      impactColumns.forEach(impact => {
+        const cell = document.createElement('td');
+        cell.textContent = String(impactTotals[impact.key]);
+        tr.appendChild(cell);
+      });
 
       const selCell = document.createElement('td');
       selCell.textContent = String(selectedTotal);
@@ -6672,7 +6693,7 @@
       const bandDownloadRows = [];
       if (!types.length) {
         const p = document.createElement('p');
-        p.textContent = 'No Complete scans with Critical + Serious counts in the current filter set.';
+        p.textContent = 'No Complete scans with selected impact counts in the current filter set.';
         details.appendChild(p);
       } else {
         types.forEach(type => {
@@ -6691,7 +6712,7 @@
           table.className = 'a11y-scan-report-table';
           const thead = document.createElement('thead');
           const hr = document.createElement('tr');
-          ['Band (Critical + Serious issues)','Scans','Percent'].forEach(t => {
+          ['Band (selected impact issues)','Scans','Percent'].forEach(t => {
             const th = document.createElement('th');
             th.textContent = t;
             th.setAttribute('scope','col');
@@ -6718,9 +6739,8 @@
               row =>
                 row.type === type &&
                 row.statusKey === 'Complete' &&
-                typeof row.impactTotal === 'number' &&
                 Number.isFinite(row.scoreVal) &&
-                getImpactBandIssues(row.impactTotal) === band,
+                getImpactBandIssues(getIssueTotal(row)) === band,
               { sortMode: 'nameOnly', context: 'impact' }
             );
             tdScans.appendChild(btn);
@@ -6773,9 +6793,8 @@
           rowFilter: (row, typeBand) =>
             row.type === typeBand.type &&
             row.statusKey === 'Complete' &&
-            typeof row.impactTotal === 'number' &&
             Number.isFinite(row.scoreVal) &&
-            getImpactBandIssues(row.impactTotal) === typeBand.band,
+            getImpactBandIssues(getIssueTotal(row)) === typeBand.band,
           groupLabel: 'Issue Impact',
           columns: [
             { key: 'group', label: 'Scan type' },
