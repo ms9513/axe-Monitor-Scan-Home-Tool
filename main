@@ -162,21 +162,54 @@
     { key: 'moderate', label: 'Moderate' },
     { key: 'minor', label: 'Minor' }
   ];
+  const monitorApiOnlyImpactKeys = new Set(['moderate','minor']);
+  const monitorApiFootnoteText = '* Moderate and Minor counts require data from the axe Monitor API.';
   const defaultPageImpactSelection = pageImpactFilterOptions.map(option => option.key);
   const pageImpactFilterStorageKey = 'a11y-page-impact-filter';
+  const defaultPageImpactSource = 'website';
+  const pageImpactSourceOptions = [
+    { key: 'website', label: 'axe Monitor website', shortLabel: 'Latest scan' },
+    { key: 'api', label: 'axe Monitor API', shortLabel: 'Monitor API' }
+  ];
+  const pageImpactSourceAllowedKeys = {
+    website: new Set(['critical','serious']),
+    api: new Set(pageImpactFilterOptions.map(option => option.key))
+  };
+  const pageImpactApiState = {
+    status: 'idle', // idle | loading | ready | error | stale
+    data: new Map(), // scanId -> { critical, serious, moderate, minor, pages? }
+    timestamp: null,
+    error: null,
+    progress: null
+  };
+  let lastApiFetchContext = null;
+  let pageImpactApiAbortController = null;
   const pageImpactFilterIdBase = `a11y-page-impact-${Math.random().toString(36).slice(2)}`;
   const pageImpactFilterState = {
     selection: new Set(defaultPageImpactSelection),
+    source: defaultPageImpactSource,
     idBase: pageImpactFilterIdBase,
     buttonId: `${pageImpactFilterIdBase}-button`,
     popoverId: `${pageImpactFilterIdBase}-popover`,
     titleId: `${pageImpactFilterIdBase}-title`,
     button: null,
     summaryEl: null,
+    sourceSegment: null,
+    sourceButtons: null,
+    apiContainer: null,
+    apiStatusEl: null,
+    apiButton: null,
+    apiChip: null,
+    footerChipContainer: null,
+    footerApiChip: null,
+    footerInfoEl: null,
+    footerBaseTimestamp: '',
     popover: null,
     workingSelection: null,
+    workingSource: null,
     outsideClickHandler: null,
-    keydownHandler: null
+    keydownHandler: null,
+    initialSourceEvaluated: false
   };
   loadStoredPageImpactFilters();
   const inertAttr = 'data-a11y-scan-report-inert';
@@ -263,6 +296,8 @@
   const logCopyPageUrls = (...args) => console.log(copyPageUrlsLogPrefix, ...args);
   const pdfInspectorLogPrefix = '[PdfInspector]';
   const logPdfInspector = (...args) => console.log(pdfInspectorLogPrefix, ...args);
+  const impactApiLogPrefix = '[ImpactAPI]';
+  const logImpactApi = (...args) => console.log(impactApiLogPrefix, ...args);
   let quickAssignOptionsCache = null;
   let quickAssignOptionsPromise = null;
   const pageHealthLogPrefix = '[PageHealth]';
@@ -495,6 +530,9 @@
       width: 100%;
       display: flex;
       align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-start;
     }
 
     .a11y-scan-report-header h1 {
@@ -569,6 +607,40 @@
     .a11y-filter-button:focus {
       outline: 2px solid var(--focus-light);
       outline-offset: 3px;
+    }
+
+    .a11y-page-impact-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .a11y-page-impact-source-toggle {
+      display: inline-flex;
+      flex-wrap: wrap;
+      align-items: center;
+      padding: 2px;
+      border-radius: 999px;
+      background: #f0f4f8;
+      box-shadow: inset 0 0 0 1px rgba(15,23,42,0.08);
+      gap: 4px;
+    }
+
+    .a11y-segment-button {
+      border: none;
+      border-radius: 999px;
+      padding: 4px 12px;
+      font-weight: 600;
+      background: transparent;
+      color: #475569;
+      transition: background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+    }
+
+    .a11y-segment-button--active {
+      background: #ffffff;
+      color: #0f172a;
+      box-shadow: 0 1px 2px rgba(15,23,42,0.18);
     }
 
     .a11y-scan-report-body {
@@ -686,11 +758,6 @@
       flex-wrap: wrap;
       margin-bottom: 8px;
     }
-    .a11y-page-impact-filter-summary {
-      font-size: 12px;
-      color: #555;
-      margin: 0;
-    }
     .a11y-page-impact-filter-block .TagButton {
       display: inline-flex;
       align-items: center;
@@ -736,6 +803,102 @@
       gap: 6px;
       margin-bottom: 8px;
       flex-wrap: wrap;
+    }
+
+    .a11y-impact-meta-chips {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      row-gap: 6px;
+      margin-left: auto;
+      padding-left: 8px;
+      pointer-events: none;
+    }
+
+    .a11y-severity-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 10px;
+      border-radius: 999px;
+      line-height: 1.2;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .a11y-severity-chip .Icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .c2adf923ed89 {
+      align-items: center;
+      border: 1px solid #02101a;
+      border-radius: 50%;
+      color: #02101a;
+      display: flex;
+      font-size: 10px;
+      font-weight: var(--font-weight-bold, 700);
+      height: 22px;
+      justify-content: center;
+      width: 22px;
+    }
+
+    .e2de49808a35 {
+      background: #ffa1a1;
+    }
+
+    .c1d7b29a41e0 {
+      background: #ffe69f;
+    }
+
+    .a99bd1117bc5 {
+      background: #d4dde0;
+    }
+
+    .f55e216514d1 {
+      background: #f2f2f2;
+    }
+
+    .a11y-page-impact-api-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      background: #f1f5f9;
+      color: #475569;
+      cursor: default;
+      text-align: left;
+    }
+
+    .a11y-page-impact-api-chip--interactive {
+      cursor: pointer;
+    }
+
+    .a11y-chip-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .a11y-chip-indicator {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      margin-left: 4px;
+      width: 14px;
+      height: 14px;
+    }
+
+    .a11y-chip-indicator svg {
+      width: 100%;
+      height: 100%;
     }
 
     .a11y-panel-toggle-btn {
@@ -1415,6 +1578,21 @@
       color: #444;
     }
 
+    .a11y-refresh-status-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      min-height: 32px;
+    }
+
+    .a11y-footer-chip-wrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
     .a11y-scan-report-refresh-btn {
       padding: 4px 10px;
       font-size: 12px;
@@ -1814,7 +1992,7 @@
   }
 
   async function fetchWasApi(path, { signal } = {}) {
-  const apiKey = ensureMonitorApiKey();
+    const apiKey = ensureMonitorApiKey();
     const url = `${wasApiBaseUrl}${path}`;
     const res = await fetch(url, {
       method: 'GET',
@@ -1868,9 +2046,15 @@
     return {
       critical: coerceNumber(issues.critical ?? issues['impactCritical'] ?? issues['impact3'], 0),
       serious: coerceNumber(issues.serious ?? issues['impactSerious'] ?? issues['impact2'], 0),
+      moderate: coerceNumber(issues.moderate ?? issues['impactModerate'] ?? issues['impact1'], 0),
+      minor: coerceNumber(issues.minor ?? issues['impactMinor'] ?? issues['impact0'], 0),
       needsReview: coerceNumber(issues.needsReview ?? issues['needs_review'] ?? issues['needs-review'], 0),
       pagesCritical: coerceNumber(pages.critical ?? pages['criticalIssues'] ?? pages['critical'], 0),
+      pagesSerious: coerceNumber(pages.serious ?? pages['seriousIssues'] ?? pages['serious'], 0),
+      pagesModerate: coerceNumber(pages.moderate ?? pages['moderateIssues'] ?? pages['moderate'], 0),
+      pagesMinor: coerceNumber(pages.minor ?? pages['minorIssues'] ?? pages['minor'], 0),
       run: latest,
+      runNumber: coerceNumber(latest.runNumber ?? latest.run ?? latest.id, null),
       status: typeof latest.status === 'string' ? latest.status : ''
     };
   }
@@ -2039,6 +2223,13 @@
   }
 
   function getRowTotalIssues(row) {
+    if (getPageImpactSource() === 'api') {
+      const counts = getIssueImpactCounts(row);
+      let total = counts.critical + counts.serious;
+      if (hasIssueImpactValue(row, 'moderate')) total += counts.moderate;
+      if (hasIssueImpactValue(row, 'minor')) total += counts.minor;
+      return total;
+    }
     if (Number.isFinite(row?.total)) return row.total;
     return getRowCritical(row) + getRowSerious(row);
   }
@@ -2047,12 +2238,35 @@
   function getIssueImpactCounts(row) {
     const getValue = value => Math.max(0, coerceNumber(value, 0));
     const pick = (target, key) => (target && target[key] != null) ? target[key] : 0;
+    if (getPageImpactSource() === 'api') {
+      const record = getPageImpactApiRecord(row);
+      if (record && record.issues) {
+        return {
+          critical: getValue(record.issues.critical),
+          serious: getValue(record.issues.serious),
+          moderate: getValue(record.issues.moderate),
+          minor: getValue(record.issues.minor)
+        };
+      }
+    }
     return {
       critical: getValue(pick(row, 'crit')),
       serious: getValue(pick(row, 'serious')),
       moderate: getValue(pick(row, 'moderate')),
       minor: getValue(pick(row, 'minor'))
     };
+  }
+
+  function requiresMonitorApiImpact(key) {
+    return monitorApiOnlyImpactKeys.has(key);
+  }
+
+  function hasIssueImpactValue(row, key) {
+    if (!requiresMonitorApiImpact(key)) return true;
+    if (getPageImpactSource() !== 'api') return false;
+    const record = getPageImpactApiRecord(row);
+    if (!record || !record.issues) return false;
+    return Number.isFinite(record.issues[key]);
   }
 
   function getFilteredIssueImpactCounts(row) {
@@ -2079,6 +2293,17 @@
       }
       return 0;
     };
+    if (getPageImpactSource() === 'api') {
+      const record = getPageImpactApiRecord(row);
+      if (record && record.pages) {
+        return {
+          critical: getValue(record.pages.critical),
+          serious: getValue(record.pages.serious),
+          moderate: getValue(record.pages.moderate),
+          minor: getValue(record.pages.minor)
+        };
+      }
+    }
     return {
       critical: getValue(pick(row, ['pageCritical','criticalPages','crit','criticalIssues','critical'])),
       serious: getValue(pick(row, ['pageSerious','seriousPages','seriousIssues','serious'])),
@@ -2149,7 +2374,8 @@
   }
 
   function getPageImpactFilterSummaryText() {
-    return `Impact filter: ${formatPageImpactSelection(getActivePageImpactKeys())}`;
+    const sourceLabel = getPageImpactSourceLabel();
+    return `Impact filter (${sourceLabel}): ${formatPageImpactSelection(getActivePageImpactKeys())}`;
   }
 
   function updatePageImpactFilterSummary(summaryEl = pageImpactFilterState.summaryEl) {
@@ -2160,11 +2386,184 @@
   function updatePageImpactFilterButton(button = pageImpactFilterState.button) {
     if (!button) return;
     const selectionText = formatPageImpactSelection(getActivePageImpactKeys());
-    const aria = `Edit filter Impact. ${selectionText} is current value.`;
+    const sourceLabel = getPageImpactSourceLabel();
+    const aria = `Edit filter Impact. ${sourceLabel} with ${selectionText} is current value.`;
     button.setAttribute('aria-label', aria);
     button.setAttribute('aria-expanded', pageImpactFilterState.popover ? 'true' : 'false');
     const valueEl = button.querySelector('.a11y-page-impact-filter-value');
-    if (valueEl) valueEl.textContent = selectionText;
+    if (valueEl) valueEl.textContent = `${sourceLabel} - ${selectionText}`;
+  }
+
+  function updatePageImpactSourceControls() {
+    const source = getPageImpactSource();
+    const map = pageImpactFilterState.sourceButtons;
+    if (map && map.size) {
+      map.forEach((btn, key) => {
+        const active = key === source;
+        btn.classList.toggle('a11y-segment-button--active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+        btn.style.background = active ? '#ffffff' : 'transparent';
+        btn.style.color = active ? '#0f172a' : '#475569';
+        btn.style.boxShadow = active ? '0 1px 2px rgba(15,23,42,0.18)' : 'none';
+      });
+    }
+    if (pageImpactFilterState.sourceSegment) {
+      pageImpactFilterState.sourceSegment.setAttribute('data-active-source', source);
+    }
+  }
+
+  function updatePageImpactApiControls() {
+    const container = pageImpactFilterState.apiContainer;
+    const statusEl = pageImpactFilterState.apiStatusEl;
+    const button = pageImpactFilterState.apiButton;
+    const chipTargets = [pageImpactFilterState.apiChip, pageImpactFilterState.footerApiChip].filter(Boolean);
+    const source = getPageImpactSource();
+    const defaultColor = '#4a5568';
+    const setChipState = (label, bg = '#f1f5f9', color = defaultColor, opts = {}) => {
+      const normalizedStatus = (label || '').toLowerCase().replace(/\s+/g, '-') || '';
+      const interactive = !!opts.interactive;
+      const text = `API data • ${label}`;
+      chipTargets.forEach(target => {
+        renderMonitorApiChipContent(target, text, { interactive });
+        target.style.background = bg;
+        target.style.color = color;
+        target.dataset.status = normalizedStatus;
+        target.dataset.chipAction = opts.action || '';
+        if (opts.coverage) {
+          target.dataset.missing = String(opts.coverage.missing ?? 0);
+          target.dataset.total = String(opts.coverage.total ?? 0);
+        } else {
+          delete target.dataset.missing;
+          delete target.dataset.total;
+        }
+        target.disabled = !interactive;
+        target.classList.toggle('a11y-page-impact-api-chip--interactive', interactive);
+        if (interactive) {
+          const aria = opts.ariaLabel || `Monitor API status ${label}. Press to load missing data.`;
+          target.setAttribute('aria-label', aria);
+        } else {
+          target.removeAttribute('aria-label');
+        }
+      });
+    };
+    if (container) container.hidden = false;
+    if (statusEl) {
+      statusEl.style.color = defaultColor;
+    }
+    if (button) {
+      button.disabled = false;
+      button.hidden = false;
+    }
+    let footerMessage = null;
+    if (source !== 'api') {
+      setChipState('off', '#e2e8f0', '#475569', { interactive: true, action: 'off', ariaLabel: 'Monitor API data is off. Press to load data.' });
+      if (statusEl) {
+        statusEl.textContent = 'Switch to the axe Monitor API to include Moderate and Minor counts.';
+      }
+      if (button) {
+        button.disabled = true;
+        button.hidden = true;
+        button.dataset.apiFetchMode = 'none';
+        button.textContent = 'Request data from API';
+      }
+      setFooterRefreshMessage(footerMessage);
+      return;
+    }
+    const coverage = getPageImpactApiCoverage();
+    const { status, error, timestamp, progress } = pageImpactApiState;
+    const shouldAutoSwitchToWebsite =
+      !pageImpactFilterState.initialSourceEvaluated &&
+      source === 'api' &&
+      coverage.total > 0 &&
+      coverage.missing > 0;
+    if (!pageImpactFilterState.initialSourceEvaluated) {
+      pageImpactFilterState.initialSourceEvaluated = true;
+    }
+    if (shouldAutoSwitchToWebsite) {
+      setPageImpactSource('website');
+      handlePageImpactFilterChanged();
+      return;
+    }
+    let message = '';
+    let color = defaultColor;
+    let buttonLabel = 'Request data from API';
+    let fetchMode = 'missing';
+    if (status === 'loading') {
+      const total = progress?.total ?? (coverage.total || 0);
+      const current = progress?.current ?? 0;
+      const label = progress?.label ? ` (${progress.label})` : '';
+      const displayTotal = Math.max(total, 1);
+      const displayIndex = Math.min(current + 1, displayTotal);
+      message = `Requesting data${label} (${displayIndex}/${displayTotal})...`;
+      buttonLabel = 'Request in progress...';
+      if (button) button.disabled = true;
+      fetchMode = 'loading';
+      setChipState('loading', '#fef3c7', '#92400e');
+      footerMessage = 'Last data refresh: Loading Monitor API data...';
+    } else if (status === 'error') {
+      message = error || 'Unable to load data from the API.';
+      color = '#a4000f';
+      buttonLabel = 'Retry API request';
+      fetchMode = 'retry';
+      setChipState('error', '#fee2e2', '#9b1c1c');
+      footerMessage = `Last data refresh: API data request failed. ${message}`;
+    } else if (coverage.total === 0) {
+      message = 'No completed scans are available in this view for API data.';
+      if (button) button.disabled = true;
+      fetchMode = 'none';
+      setChipState('no scans', '#e2e8f0', '#475569');
+      footerMessage = 'Last data refresh: No completed scans available for Monitor API data.';
+    } else if (coverage.missing > 0) {
+      message = `API data missing for ${coverage.missing} of ${coverage.total} scans. Request data to include all impacts.`;
+      buttonLabel = 'Load missing data';
+      fetchMode = 'missing';
+      setChipState('missing', '#fff7ed', '#9a3412', { interactive: true, action: 'missing', coverage, ariaLabel: 'API data missing. Press to load missing data.' });
+      footerMessage = `Last data refresh: API data missing for ${coverage.missing} of ${coverage.total} scans.`;
+    } else {
+      message = `API data loaded for ${coverage.total} scans.`;
+      if (timestamp) {
+        message += ` Last updated ${new Date(timestamp).toLocaleString()}.`;
+      }
+      color = '#1b5e20';
+      buttonLabel = 'Request data from API';
+      fetchMode = 'none';
+      setChipState('ready', '#d1fae5', '#065f46');
+      const updatedText = timestamp ? new Date(timestamp).toLocaleString() : pageImpactFilterState.footerBaseTimestamp;
+      footerMessage = `Last data refresh: API data loaded for ${coverage.total} scans. Last updated ${updatedText || new Date().toLocaleString()}.`;
+      if (button) {
+        button.disabled = true;
+        button.hidden = true;
+        button.dataset.apiFetchMode = 'none';
+      }
+    }
+    if (statusEl) {
+      statusEl.textContent = message;
+      statusEl.style.color = color;
+    }
+    if (button) {
+      button.textContent = buttonLabel;
+      button.dataset.apiFetchMode = fetchMode;
+    }
+    setFooterRefreshMessage(footerMessage);
+  }
+
+  async function handleMonitorApiChipClick(target = pageImpactFilterState.apiChip) {
+    const chip = target;
+    if (!chip || chip.disabled) return;
+    const action = chip.dataset.chipAction;
+    if (action === 'missing') {
+      const missing = Number(chip.dataset.missing) || 0;
+      const total = Number(chip.dataset.total) || 0;
+      if (!missing) return;
+      await openMonitorApiMissingDialog({ missing, total });
+      return;
+    }
+    if (action === 'off') {
+      const ok = await ensureMonitorApiDataAvailability({ reason: 'chip-off', selection: monitorApiOnlyImpactKeys });
+      if (!ok) return;
+      setPageImpactSource('api');
+      handlePageImpactFilterChanged();
+    }
   }
 
   function closePageImpactFilterPopover({ focusButton = false } = {}) {
@@ -2183,6 +2582,7 @@
       pageImpactFilterState.popover = null;
     }
     pageImpactFilterState.workingSelection = null;
+    pageImpactFilterState.workingSource = null;
     if (pageImpactFilterState.button) {
       pageImpactFilterState.button.setAttribute('aria-expanded','false');
       if (focusButton && pageImpactFilterState.button.isConnected) {
@@ -2227,7 +2627,9 @@
     if (!button) return;
     closePageImpactFilterPopover({ focusButton: false });
     const workingSelection = new Set(getActivePageImpactKeys());
+    let workingSource = getPageImpactSource();
     pageImpactFilterState.workingSelection = workingSelection;
+    pageImpactFilterState.workingSource = workingSource;
     const popover = document.createElement('div');
     popover.id = pageImpactFilterState.popoverId;
     popover.className = 'Popover Popover--left';
@@ -2247,26 +2649,54 @@
     const title = document.createElement('span');
     title.className = 'Offscreen';
     title.id = pageImpactFilterState.titleId;
-    title.textContent = `Edit filter Impact. ${formatPageImpactSelection(getActivePageImpactKeys())} is current value.`;
+    const screenReaderSourceLabel = getPageImpactSourceLabel(workingSource);
+    title.textContent = `Edit filter Impact. ${screenReaderSourceLabel} with ${formatPageImpactSelection(getActivePageImpactKeys())} is current value.`;
     panel.appendChild(title);
 
-    const content = document.createElement('div');
-    content.className = 'Panel__Content ce354eef3eec Panel__Content--no-padding';
-    const legend = document.createElement('h3');
-    legend.id = `${pageImpactFilterState.idBase}-legend`;
-    legend.className = 'd1a6281dccdb';
-    legend.textContent = 'Impact';
-    const requiredTag = document.createElement('span');
-    requiredTag.className = 'ed12a719826a';
-    requiredTag.textContent = 'Required';
-    legend.appendChild(requiredTag);
+  const content = document.createElement('div');
+  content.className = 'Panel__Content ce354eef3eec Panel__Content--no-padding';
+  const checkboxMap = new Map();
+
+    const syncWorkingSelectionToSource = source => {
+      const allowed = getAllowedImpactKeysForSource(source);
+      let changed = false;
+      Array.from(workingSelection).forEach(key => {
+        if (!allowed.has(key)) {
+          workingSelection.delete(key);
+          changed = true;
+        }
+      });
+      if (!workingSelection.size) {
+        getDefaultImpactsForSource(source).forEach(key => workingSelection.add(key));
+        changed = true;
+      }
+      return changed;
+    };
+
+  const legend = document.createElement('h3');
+  legend.id = `${pageImpactFilterState.idBase}-legend`;
+  legend.className = 'd1a6281dccdb';
+  legend.textContent = 'Impact';
+  const requiredTag = document.createElement('span');
+  requiredTag.className = 'ed12a719826a';
+  requiredTag.textContent = 'Required';
+  legend.appendChild(requiredTag);
     content.appendChild(legend);
+
+    const sourceHint = document.createElement('p');
+    sourceHint.className = 'a11y-page-impact-source-hint';
+    sourceHint.style.margin = '0 16px 12px';
+    sourceHint.style.fontSize = '12px';
+    sourceHint.style.color = '#4a5568';
+    content.appendChild(sourceHint);
+
     const group = document.createElement('div');
     group.className = 'a11y-page-impact-options';
     group.setAttribute('role','group');
     group.setAttribute('aria-labelledby', legend.id);
-    const checkboxMap = new Map();
     const handleToggle = (key, checked) => {
+      const allowed = getAllowedImpactKeysForSource(workingSource);
+      if (!allowed.has(key)) return;
       if (checked) {
         workingSelection.add(key);
       } else {
@@ -2312,6 +2742,10 @@
     positionPageImpactPopover(popover, button);
     button.setAttribute('aria-expanded','true');
 
+    syncWorkingSelectionToSource(workingSource);
+  refreshCheckboxStates();
+    updateSourceHintText();
+
     function updateApplyState() {
       const hasSelection = workingSelection.size > 0;
       applyBtn.disabled = !hasSelection;
@@ -2319,26 +2753,69 @@
     }
     updateApplyState();
 
-    function handleApply() {
+    async function handleApply() {
       if (!workingSelection.size) {
         updateApplyState();
         return;
       }
-      setPageImpactSelection(workingSelection);
+      if (
+        workingSource === 'api' &&
+        selectionHasMonitorApiOnlyImpacts(workingSelection)
+      ) {
+        const ok = await ensureMonitorApiDataAvailability({
+          reason: 'filter',
+          selection: workingSelection
+        });
+        if (!ok) return;
+      }
+      applyPageImpactFilter(workingSelection, workingSource);
       closePageImpactFilterPopover({ focusButton: false });
       handlePageImpactFilterChanged();
     }
 
     function handleReset() {
       workingSelection.clear();
-      defaultPageImpactSelection.forEach(key => workingSelection.add(key));
-      checkboxMap.forEach((input, key) => {
-        input.checked = workingSelection.has(key);
-      });
+      getDefaultImpactsForSource(workingSource).forEach(key => workingSelection.add(key));
+      refreshCheckboxStates();
+      updateSourceHintText();
       updateApplyState();
     }
 
-    applyBtn.addEventListener('click', handleApply);
+    function refreshCheckboxStates() {
+      const allowed = getAllowedImpactKeysForSource(workingSource);
+      checkboxMap.forEach((input, key) => {
+        const isAllowed = allowed.has(key);
+        input.disabled = !isAllowed;
+        if (isAllowed) {
+          input.removeAttribute('aria-disabled');
+        } else {
+          input.setAttribute('aria-disabled','true');
+          input.checked = false;
+        }
+        input.checked = workingSelection.has(key);
+        const wrap = input.parentElement;
+        if (wrap) {
+          wrap.classList.toggle('a11y-page-impact-option--disabled', !isAllowed);
+          wrap.style.opacity = isAllowed ? '' : '0.5';
+        }
+      });
+      updateSourceHintText();
+    }
+
+    function updateSourceHintText() {
+      if (workingSource === 'api') {
+        sourceHint.textContent = 'Moderate and Minor counts are included via the axe Monitor API.';
+      } else {
+        sourceHint.textContent = 'Moderate and Minor counts require the axe Monitor API. Use the toggle next to the Impact button to switch sources.';
+      }
+    }
+
+    applyBtn.addEventListener('click', () => {
+      handleApply().catch(err => {
+        console.error(err);
+        alert(err?.message || 'Unable to apply impact filter.');
+      });
+    });
     cancelBtn.addEventListener('click', () => closePageImpactFilterPopover({ focusButton: true }));
     resetBtn.addEventListener('click', handleReset);
 
@@ -2373,15 +2850,117 @@
     document.addEventListener('keydown', keydownHandler, true);
     pageImpactFilterState.keydownHandler = keydownHandler;
 
-    const firstInput = checkboxMap.values().next().value;
-    if (firstInput) {
-      firstInput.focus();
+    const firstEnabledCheckbox = Array.from(checkboxMap.values()).find(input => !input.disabled);
+    if (firstEnabledCheckbox) {
+      firstEnabledCheckbox.focus();
+    }
+  }
+
+  function buildPageImpactSourceToggleControl() {
+    if (!Array.isArray(pageImpactSourceOptions) || !pageImpactSourceOptions.length) {
+      return null;
+    }
+    const sourceSegment = document.createElement('div');
+    sourceSegment.className = 'a11y-page-impact-source-toggle';
+    sourceSegment.style.display = 'inline-flex';
+    sourceSegment.style.flexWrap = 'wrap';
+    sourceSegment.style.padding = '2px';
+    sourceSegment.style.borderRadius = '999px';
+    sourceSegment.style.background = '#f0f4f8';
+    sourceSegment.style.boxShadow = 'inset 0 0 0 1px rgba(15,23,42,0.08)';
+    sourceSegment.setAttribute('role','group');
+    sourceSegment.setAttribute('aria-label','Impact data source');
+
+    const sourceButtons = new Map();
+    const currentSource = getPageImpactSource();
+    const handleSourceSelection = async key => {
+      if (getPageImpactSource() === key) return;
+      if (key === 'api') {
+        const ok = await ensureMonitorApiDataAvailability({ reason: 'toggle' });
+        if (!ok) {
+          updatePageImpactSourceControls();
+          return;
+        }
+      }
+      setPageImpactSource(key);
+      handlePageImpactFilterChanged();
+    };
+    pageImpactSourceOptions.forEach(option => {
+      const segBtn = document.createElement('button');
+      segBtn.type = 'button';
+      segBtn.className = 'Button--tertiary Button--thin a11y-segment-button';
+      segBtn.textContent = option.shortLabel || option.label;
+      segBtn.style.border = 'none';
+      segBtn.style.borderRadius = '999px';
+      segBtn.style.padding = '4px 12px';
+      segBtn.style.fontWeight = '600';
+      segBtn.dataset.sourceKey = option.key;
+      segBtn.setAttribute('aria-pressed', option.key === currentSource ? 'true' : 'false');
+      segBtn.addEventListener('click', () => {
+        handleSourceSelection(option.key).catch(err => console.error(err));
+      });
+      sourceSegment.appendChild(segBtn);
+      sourceButtons.set(option.key, segBtn);
+    });
+
+    pageImpactFilterState.sourceSegment = sourceSegment;
+    pageImpactFilterState.sourceButtons = sourceButtons;
+    updatePageImpactSourceControls();
+    return sourceSegment;
+  }
+
+  function createMonitorApiChipElement() {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'a11y-page-impact-api-chip';
+    chip.style.display = 'inline-flex';
+    chip.style.alignItems = 'center';
+    chip.style.gap = '4px';
+    chip.style.padding = '2px 10px';
+    chip.style.borderRadius = '999px';
+    chip.style.fontSize = '12px';
+    chip.style.fontWeight = '600';
+    chip.style.background = '#f1f5f9';
+    chip.style.color = '#475569';
+    chip.style.border = '1px solid rgba(15,23,42,0.08)';
+    chip.disabled = true;
+    chip.dataset.chipAction = '';
+    chip.addEventListener('click', () => {
+      handleMonitorApiChipClick(chip).catch(err => console.error(err));
+    });
+    return chip;
+  }
+
+  const monitorApiChipIndicatorSvg = '<svg overflow="visible" preserveAspectRatio="none" viewBox="0 0 16 16" height="16" width="16"><path d="M8 1a.75.75 0 0 1 .75.75v4.5h4.5a.75.75 0 0 1 0 1.5h-5.25A.75.75 0 0 1 7.25 7V1.75A.75.75 0 0 1 8 1Zm-5 4a.75.75 0 0 0-.53 1.28l3.75 3.75v2.19a2.78 2.78 0 0 0 4.74 1.96l3.06-3.06a.75.75 0 1 0-1.06-1.06l-3.06 3.06a1.28 1.28 0 0 1-2.18-.9v-2.5a.75.75 0 0 0-.22-.53L4.53 5.28A.75.75 0 0 0 3 5Z" fill="currentColor" vector-effect="non-scaling-stroke"></path></svg>';
+
+  function renderMonitorApiChipContent(target, text, { interactive = false } = {}) {
+    if (!target) return;
+    target.innerHTML = '';
+    const labelSpan = document.createElement('span');
+    labelSpan.className = 'a11y-chip-label';
+    labelSpan.textContent = text;
+    target.appendChild(labelSpan);
+    if (interactive) {
+      const indicator = document.createElement('span');
+      indicator.className = 'a11y-chip-indicator';
+      indicator.setAttribute('aria-hidden','true');
+      indicator.innerHTML = monitorApiChipIndicatorSvg;
+      target.appendChild(indicator);
     }
   }
 
   function buildPageImpactFilterControls() {
     const block = document.createElement('div');
     block.className = 'a11y-page-impact-filter-block';
+
+    const toolbar = document.createElement('div');
+    toolbar.className = 'a11y-page-impact-toolbar';
+    toolbar.style.display = 'flex';
+    toolbar.style.flexDirection = 'column';
+    toolbar.style.alignItems = 'flex-start';
+    toolbar.style.gap = '8px';
+    block.appendChild(toolbar);
+
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'TagButton Tag Button--tag';
@@ -2409,20 +2988,27 @@
     icon.setAttribute('aria-hidden','true');
     icon.innerHTML = '<svg overflow="visible" preserveAspectRatio="none" viewBox="0 0 24 24" height="24" width="24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a.996.996 0 0 0 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" vector-effect="non-scaling-stroke" fill="currentColor"></path></svg>';
     button.appendChild(icon);
-    block.appendChild(button);
-    const summary = document.createElement('p');
-    summary.className = 'a11y-page-impact-filter-summary';
-    block.appendChild(summary);
+    toolbar.appendChild(button);
+
     pageImpactFilterState.button = button;
-    pageImpactFilterState.summaryEl = summary;
+    pageImpactFilterState.summaryEl = null;
+    pageImpactFilterState.apiContainer = null;
+    pageImpactFilterState.apiStatusEl = null;
+    pageImpactFilterState.apiButton = null;
+    pageImpactFilterState.apiChip = null;
+
     updatePageImpactFilterButton(button);
-    updatePageImpactFilterSummary(summary);
+    updatePageImpactSourceControls();
+    updatePageImpactApiControls();
+
     return block;
   }
 
   function handlePageImpactFilterChanged() {
     updatePageImpactFilterButton();
     updatePageImpactFilterSummary();
+    updatePageImpactSourceControls();
+    updatePageImpactApiControls();
     if (pageContext !== 'scans') return;
     if (!modalContext || !modalContext.body || !lastRenderedData) return;
     const { body, footer, updateFilterButtonLabel } = modalContext;
@@ -2436,6 +3022,192 @@
         if (pageImpactFilterState.button) {
           pageImpactFilterState.button.focus();
         }
+      });
+    }
+  }
+
+  async function requestPageImpactApiData({ mode, includeAll = false } = {}) {
+    if (pageContext !== 'scans') {
+      alert('API data is only available from the scans summary view.');
+      return;
+    }
+    if (pageImpactApiState.status === 'loading') {
+      logImpactApi('Ignoring API request: another request is already running');
+      return;
+    }
+    const desiredMode = mode || pageImpactFilterState.apiButton?.dataset?.apiFetchMode || 'missing';
+    const fetchAll = includeAll || desiredMode === 'reload';
+    if (!getStoredMonitorApiKey()) {
+      try {
+        const saved = await openSettingsDialog({ focusField: 'apiKey' });
+        if (!saved && !getStoredMonitorApiKey()) {
+          alert('Set the Deque Monitor API key before requesting data.');
+          return;
+        }
+      } catch (err) {
+        console.error(err);
+        alert(err?.message || 'Unable to open settings.');
+        return;
+      }
+    }
+    if (!lastRenderedData) {
+      alert('Scan data is still loading. Please try again in a moment.');
+      return;
+    }
+    const scanRowsMap = getImpactScanRows();
+    if (!scanRowsMap.size) {
+      alert('No scans are currently available for API requests.');
+      return;
+    }
+    const fallbackLookup = new Map();
+    const allRows = Array.isArray(lastRenderedData?.rows) ? lastRenderedData.rows : [];
+    allRows.forEach(row => {
+      const id = getRowScanId(row);
+      if (!id) return;
+      if (!fallbackLookup.has(id) && row?.url) {
+        fallbackLookup.set(id, row);
+      }
+    });
+    const targets = [];
+    scanRowsMap.forEach((primaryRow, id) => {
+      if (primaryRow?.statusKey && primaryRow.statusKey !== 'Complete') return;
+      const hasData = pageImpactApiState.data.has(id);
+      if (!fetchAll && hasData) return;
+      let candidate = primaryRow;
+      if (!candidate?.url) {
+        const fallback = fallbackLookup.get(id);
+        if (fallback) {
+          candidate = { ...fallback, ...candidate };
+        }
+      }
+      if (!candidate?.url) {
+        logImpactApi('Skipping scan', id, 'missing scan URL for API request');
+        return;
+      }
+      targets.push([id, candidate]);
+    });
+    if (!targets.length) {
+      logImpactApi('No scans require API refresh', { fetchAll });
+      updatePageImpactApiControls();
+      return;
+    }
+
+    logImpactApi('Starting API request for', targets.length, 'scans');
+    pageImpactApiState.status = 'loading';
+    pageImpactApiState.error = null;
+    pageImpactApiState.progress = { current: 0, total: targets.length, label: '' };
+    updatePageImpactApiControls();
+
+    pageImpactApiAbortController?.abort();
+    pageImpactApiAbortController = new AbortController();
+    const progress = openProgressDialog({
+      title: 'Requesting API data',
+      initialMessage: `Fetching ${targets.length} scan${targets.length === 1 ? '' : 's'}...`
+    });
+    progress.onCancel(() => {
+      pageImpactApiAbortController?.abort();
+    });
+
+    const errors = [];
+    const successes = [];
+    const signal = pageImpactApiAbortController.signal;
+    try {
+      for (let i = 0; i < targets.length; i++) {
+        if (signal.aborted) {
+          const abortErr = new Error('cancelled');
+          abortErr.name = 'AbortError';
+          throw abortErr;
+        }
+        const [id, row] = targets[i];
+        const label = row?.name || row?.type || `Scan ${id}`;
+        pageImpactApiState.progress = { current: i, total: targets.length, label };
+        updatePageImpactApiControls();
+        progress.update(`Loading ${label} (${i + 1}/${targets.length})...`);
+        try {
+          const metrics = await fetchRunMetricsForRow(row, { signal });
+          const record = {
+            issues: {
+              critical: metrics.critical,
+              serious: metrics.serious,
+              moderate: metrics.moderate,
+              minor: metrics.minor
+            },
+            pages: {
+              critical: metrics.pagesCritical,
+              serious: metrics.pagesSerious,
+              moderate: metrics.pagesModerate,
+              minor: metrics.pagesMinor
+            },
+            status: metrics.status || '',
+            runNumber: metrics.runNumber ?? null,
+            fetchedAt: Date.now(),
+            name: row?.name || ''
+          };
+          pageImpactApiState.data.set(String(id), record);
+          successes.push(id);
+          logImpactApi('Loaded API data for', label, `(${id})`);
+        } catch (err) {
+          if (err?.name === 'AbortError') throw err;
+          logImpactApi('API request failed for', id, err?.message || err);
+          errors.push({ id, name: row?.name || '', message: err?.message || 'Request failed' });
+        }
+      }
+    } catch (err) {
+      if (err?.name !== 'AbortError') {
+        console.error(err);
+        pageImpactApiState.status = 'error';
+        pageImpactApiState.error = err?.message || 'Unable to load data from the API.';
+        logImpactApi('API request failed:', pageImpactApiState.error);
+        updatePageImpactApiControls();
+        alert(pageImpactApiState.error);
+        return;
+      }
+      logImpactApi('API request cancelled by user');
+      pageImpactApiState.status = pageImpactApiState.data.size ? 'ready' : 'idle';
+  pageImpactApiState.error = null;
+      pageImpactApiState.progress = null;
+      pageImpactApiAbortController = null;
+      updatePageImpactApiControls();
+      alert('API request cancelled.');
+      return;
+    } finally {
+      progress.close();
+      pageImpactApiAbortController = null;
+      pageImpactApiState.progress = null;
+    }
+
+    if (errors.length && !successes.length) {
+      pageImpactApiState.status = 'error';
+      const failedNames = errors.map(item => item.name || item.id).filter(Boolean);
+      const listText = failedNames.slice(0, 3).join(', ');
+      pageImpactApiState.error = failedNames.length > 3
+        ? `${failedNames.length} scans failed (e.g., ${listText}).`
+        : `Failed to load data for ${listText || 'the selected scans'}.`;
+      logImpactApi('API request failed for all scans');
+    } else {
+      pageImpactApiState.status = errors.length ? 'error' : 'ready';
+      pageImpactApiState.timestamp = Date.now();
+      if (errors.length) {
+        const failedNames = errors.map(item => item.name || item.id).filter(Boolean);
+        const listText = failedNames.slice(0, 3).join(', ');
+        pageImpactApiState.error = failedNames.length > 3
+          ? `${failedNames.length} scans failed (e.g., ${listText}).`
+          : `Failed to load data for ${listText || 'one or more scans'}.`;
+      } else {
+        pageImpactApiState.error = null;
+      }
+      lastApiFetchContext = {
+        scanIds: new Set(getImpactScanIds()),
+        timestamp: pageImpactApiState.timestamp
+      };
+    }
+
+    logImpactApi('API request finished', { successCount: successes.length, errorCount: errors.length });
+    updatePageImpactApiControls();
+    if (pageImpactApiState.data.size) {
+      await refreshMainView({ preserveState: true }).catch(err => {
+        console.error(err);
+        logImpactApi('Unable to refresh view after API load:', err?.message || err);
       });
     }
   }
@@ -2975,39 +3747,249 @@
     return cleaned;
   }
 
+  function getAllowedImpactKeysForSource(source) {
+    const key = source === 'api' ? 'api' : 'website';
+    return pageImpactSourceAllowedKeys[key] || pageImpactSourceAllowedKeys[defaultPageImpactSource];
+  }
+
+  function getDefaultImpactsForSource(source = defaultPageImpactSource) {
+    const allowed = getAllowedImpactKeysForSource(source);
+    return pageImpactFilterOptions
+      .map(option => option.key)
+      .filter(key => allowed.has(key));
+  }
+
+  function normalizeSelectionForSource(keys, source) {
+    const allowed = getAllowedImpactKeysForSource(source);
+    const list = Array.isArray(keys) ? keys.slice() : Array.from(keys || []);
+    const cleaned = [];
+    pageImpactFilterOptions.forEach(option => {
+      if (!allowed.has(option.key)) return;
+      if (!list.includes(option.key)) return;
+      if (cleaned.includes(option.key)) return;
+      cleaned.push(option.key);
+    });
+    return cleaned;
+  }
+
   function loadStoredPageImpactFilters() {
     try {
       const raw = localStorage.getItem(pageImpactFilterStorageKey);
       if (!raw) return;
       const parsed = JSON.parse(raw);
-      const cleaned = sanitizePageImpactSelection(parsed);
-      if (!cleaned.length) return;
-      pageImpactFilterState.selection = new Set(cleaned);
+      let storedSelection = [];
+      let storedSource = defaultPageImpactSource;
+      if (Array.isArray(parsed)) {
+        storedSelection = sanitizePageImpactSelection(parsed);
+      } else if (parsed && typeof parsed === 'object') {
+        storedSelection = sanitizePageImpactSelection(parsed.selection);
+        if (parsed.source === 'api' || parsed.source === 'website') {
+          storedSource = parsed.source;
+        }
+      } else {
+        return;
+      }
+      const normalized = normalizeSelectionForSource(storedSelection, storedSource);
+      const finalSelection = normalized.length ? normalized : getDefaultImpactsForSource(storedSource);
+      pageImpactFilterState.source = storedSource;
+      pageImpactFilterState.selection = new Set(finalSelection);
+      persistPageImpactFilters(finalSelection, storedSource);
     } catch (err) {
       // ignore storage access errors
     }
   }
 
-  function persistPageImpactFilters(keys) {
+  function persistPageImpactFilters(selectionKeys, source = pageImpactFilterState.source) {
     try {
-      localStorage.setItem(pageImpactFilterStorageKey, JSON.stringify(keys));
+      const keys = Array.isArray(selectionKeys) ? selectionKeys.slice() : Array.from(selectionKeys || []);
+      const payload = {
+        selection: keys,
+        source
+      };
+      localStorage.setItem(pageImpactFilterStorageKey, JSON.stringify(payload));
     } catch (err) {
       // ignore storage access errors
     }
   }
 
-  function setPageImpactSelection(keys) {
-    const cleaned = sanitizePageImpactSelection(Array.from(keys || []));
-    const next = cleaned.length ? cleaned : defaultPageImpactSelection.slice();
+  function applyPageImpactFilter(selectionKeys, source) {
+    const normalizedSource = (source === 'api' || source === 'website') ? source : defaultPageImpactSource;
+    pageImpactFilterState.source = normalizedSource;
+    setPageImpactSelection(selectionKeys, normalizedSource);
+  }
+
+  function setPageImpactSelection(keys, source = pageImpactFilterState.source) {
+    const cleaned = sanitizePageImpactSelection(Array.isArray(keys) ? keys : Array.from(keys || []));
+    const normalized = normalizeSelectionForSource(cleaned, source);
+    const next = normalized.length ? normalized : getDefaultImpactsForSource(source);
     pageImpactFilterState.selection = new Set(next);
-    persistPageImpactFilters(next);
+    persistPageImpactFilters(next, source);
+  }
+
+  function setPageImpactSource(source) {
+    const normalizedSource = (source === 'api' || source === 'website') ? source : defaultPageImpactSource;
+    const prevSource = getPageImpactSource();
+    let nextSelection = Array.from(pageImpactFilterState.selection || []);
+    if (normalizedSource === 'api' && prevSource !== 'api') {
+      const defaults = getDefaultImpactsForSource('api');
+      defaults.forEach(key => {
+        if (!nextSelection.includes(key)) nextSelection.push(key);
+      });
+    }
+    applyPageImpactFilter(nextSelection, normalizedSource);
+  }
+
+  function getPageImpactSource() {
+    return pageImpactFilterState.source || defaultPageImpactSource;
+  }
+
+  function getPageImpactSourceLabel(source = getPageImpactSource()) {
+    const option = pageImpactSourceOptions.find(entry => entry.key === source);
+    if (option) return option.label;
+    const fallback = pageImpactSourceOptions.find(entry => entry.key === defaultPageImpactSource);
+    return fallback ? fallback.label : source;
   }
 
   function getActivePageImpactSet() {
+    const source = getPageImpactSource();
     if (!pageImpactFilterState.selection || !pageImpactFilterState.selection.size) {
-      pageImpactFilterState.selection = new Set(defaultPageImpactSelection);
+      pageImpactFilterState.selection = new Set(getDefaultImpactsForSource(source));
+      persistPageImpactFilters(Array.from(pageImpactFilterState.selection), source);
+      return pageImpactFilterState.selection;
+    }
+    const currentKeys = Array.from(pageImpactFilterState.selection);
+    const normalized = normalizeSelectionForSource(currentKeys, source);
+    if (normalized.length !== currentKeys.length || normalized.some((key, idx) => key !== currentKeys[idx])) {
+      const finalKeys = normalized.length ? normalized : getDefaultImpactsForSource(source);
+      pageImpactFilterState.selection = new Set(finalKeys);
+      persistPageImpactFilters(finalKeys, source);
     }
     return pageImpactFilterState.selection;
+  }
+
+  function getRowScanId(row) {
+    if (!row) return null;
+    if (row.scanId != null && row.scanId !== '') return String(row.scanId);
+    const url = row.url || row.scanUrl || '';
+    const id = extractScanIdFromUrl(url);
+    return id ? String(id) : null;
+  }
+
+  function getImpactScanRows() {
+    const map = new Map();
+    const addRow = row => {
+      const id = getRowScanId(row);
+      if (!id) return;
+      if (!map.has(id)) {
+        map.set(id, row);
+      }
+    };
+    const issueRows = Array.isArray(lastRenderedData?.filtered) ? lastRenderedData.filtered : [];
+    issueRows.forEach(addRow);
+    const pageRows = Array.isArray(lastRenderedData?.pagesSummary?.filtered) ? lastRenderedData.pagesSummary.filtered : [];
+    pageRows.forEach(addRow);
+    return map;
+  }
+
+  function getImpactScanIds() {
+    return Array.from(getImpactScanRows().keys());
+  }
+
+  function getPageImpactApiRecord(rowOrId) {
+    if (!rowOrId) return null;
+    const key = typeof rowOrId === 'string' ? rowOrId : getRowScanId(rowOrId);
+    if (!key) return null;
+    return pageImpactApiState.data.get(String(key)) || null;
+  }
+
+  function getPageImpactApiCoverage() {
+    const ids = getImpactScanIds();
+    const total = ids.length;
+    let available = 0;
+    ids.forEach(id => {
+      if (pageImpactApiState.data.has(id)) available += 1;
+    });
+    const missing = total - available;
+    return { total, available, missing };
+  }
+
+  function isMonitorApiDataReady() {
+    if (pageImpactApiState.status === 'loading') return false;
+    const coverage = getPageImpactApiCoverage();
+    if (!coverage.total || coverage.missing > 0) return false;
+    return pageImpactApiState.data.size >= coverage.total;
+  }
+
+  function setFooterBaseTimestamp(value) {
+    pageImpactFilterState.footerBaseTimestamp = value || '';
+  }
+
+  function setFooterRefreshMessage(message) {
+    const info = pageImpactFilterState.footerInfoEl;
+    if (!info) return;
+    const base = pageImpactFilterState.footerBaseTimestamp || new Date().toLocaleString();
+    const finalText = message || `Last data refresh: ${base}`;
+    info.textContent = finalText;
+  }
+
+  function selectionHasMonitorApiOnlyImpacts(selection) {
+    if (!selection) return false;
+    const values = selection instanceof Set
+      ? Array.from(selection)
+      : Array.isArray(selection)
+        ? selection.slice()
+        : [selection];
+    return values.some(key => monitorApiOnlyImpactKeys.has(key));
+  }
+
+  async function ensureMonitorApiDataAvailability({ reason = 'toggle', selection } = {}) {
+    if (isMonitorApiDataReady()) return true;
+    if (pageImpactApiState.status === 'loading') return true;
+    if (selection && !selectionHasMonitorApiOnlyImpacts(selection)) {
+      return true;
+    }
+    const coverage = getPageImpactApiCoverage();
+    const missingText = coverage.total
+      ? `${coverage.missing} of ${coverage.total} scans are missing Monitor API data.`
+      : 'Monitor API data has not been requested for the scans shown on this page yet.';
+    const intro = reason === 'filter'
+      ? 'Moderate and Minor impacts require data from the Monitor API.'
+      : 'Switching to the Monitor API enables Moderate and Minor impacts.';
+    const confirmed = await openSimpleDialog({
+      title: 'Load Monitor API data',
+      message: `${intro}\n\n${missingText}\n\nLoad data from the API now?`,
+      primaryLabel: 'Load missing data',
+      secondaryLabel: 'Not now'
+    });
+    if (!confirmed) return false;
+    try {
+      await requestPageImpactApiData({ mode: 'missing' });
+      if (!getStoredMonitorApiKey()) {
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.error(err);
+      return false;
+    }
+  }
+
+  async function openMonitorApiMissingDialog({ missing, total }) {
+    if (!missing) return;
+    const plural = total === 1 ? 'scan' : 'scans';
+    const message = `Monitor API data is missing for ${missing} of ${total} ${plural}. Moderate and Minor impacts will remain blank until the data loads.\n\nLoad the missing data now?`;
+    const confirmed = await openSimpleDialog({
+      title: 'Monitor API data missing',
+      message,
+      primaryLabel: 'Load missing data',
+      secondaryLabel: 'Close'
+    });
+    if (!confirmed) return;
+    try {
+      await requestPageImpactApiData({ mode: 'missing' });
+    } catch (err) {
+      console.error(err);
+    }
   }
 
   function getActivePageImpactKeys() {
@@ -5518,8 +6500,21 @@
 
   // --- Scan list dialog (from counts) ---
 
-  function openScansListDialog(contextLabel, scans, onClose) {
+  function openScansListDialog(contextLabel, scans, onClose, options = {}) {
     if (!scans || !scans.length) return;
+
+    const dialogMode = options.mode || 'issues';
+    const downloadBase = options.filenameBase || (dialogMode === 'pages' ? 'page-impact-drilldown' : 'scan-drilldown');
+    let impactColumns = dialogMode === 'pages'
+      ? pageImpactFilterOptions.filter(opt => getActivePageImpactKeys().includes(opt.key))
+      : [];
+    if (dialogMode === 'pages' && !impactColumns.length) {
+      impactColumns = pageImpactFilterOptions.slice();
+    }
+    const hasPageColumns = dialogMode === 'pages';
+    const pageColumnHeaders = hasPageColumns
+      ? impactColumns.map(opt => `Pages with ${opt.label} issues`)
+      : [];
 
     const overlay = document.createElement('div');
     overlay.className = 'a11y-filter-overlay'; // reuse styling
@@ -5550,7 +6545,15 @@
     table.className = 'a11y-scan-report-table';
     const thead = document.createElement('thead');
     const hr = document.createElement('tr');
-    ['Scan Name','Score','Critical','Serious','Total','Last Run','Status'].forEach(t => {
+    const baseHeaders = ['Scan Name','Score'];
+    const trailingHeaders = ['Last Run','Status'];
+    let bodyHeaders = [];
+    if (hasPageColumns) {
+      bodyHeaders = [...pageColumnHeaders, 'Total pages with selected impacts'];
+    } else {
+      bodyHeaders = ['Critical','Serious','Moderate*','Minor*','Total'];
+    }
+    [...baseHeaders, ...bodyHeaders, ...trailingHeaders].forEach(t => {
       const th = document.createElement('th');
       th.textContent = t;
       th.setAttribute('scope','col');
@@ -5572,17 +6575,46 @@
       scoreCell.textContent = r.scoreText || (Number.isFinite(r.scoreVal) ? `${r.scoreVal}%` : '');
       tr.appendChild(scoreCell);
 
-      const critCell = document.createElement('td');
-      critCell.textContent = typeof r.crit === 'number' ? String(r.crit) : '';
-      tr.appendChild(critCell);
+      if (hasPageColumns) {
+        const counts = getFilteredPageImpactCounts(r);
+        let rowTotal = 0;
+        impactColumns.forEach(opt => {
+          const td = document.createElement('td');
+          const count = Math.max(0, coerceNumber(counts[opt.key], 0));
+          td.textContent = String(count);
+          tr.appendChild(td);
+          rowTotal += count;
+        });
+        const totalCell = document.createElement('td');
+        totalCell.textContent = String(rowTotal);
+        tr.appendChild(totalCell);
+      } else {
+        const counts = getIssueImpactCounts(r);
+        const getCountValue = key => Math.max(0, coerceNumber(counts[key], 0));
+        const appendIssueCell = key => {
+          const td = document.createElement('td');
+          const needsApi = requiresMonitorApiImpact(key);
+          const hasValue = !needsApi || hasIssueImpactValue(r, key);
+          if (hasValue) {
+            td.textContent = String(getCountValue(key));
+          } else {
+            td.textContent = '-';
+          }
+          tr.appendChild(td);
+        };
 
-      const seriousCell = document.createElement('td');
-      seriousCell.textContent = typeof r.serious === 'number' ? String(r.serious) : '';
-      tr.appendChild(seriousCell);
+        appendIssueCell('critical');
+        appendIssueCell('serious');
+        appendIssueCell('moderate');
+        appendIssueCell('minor');
 
-      const totalCell = document.createElement('td');
-      totalCell.textContent = typeof r.total === 'number' ? String(r.total) : '';
-      tr.appendChild(totalCell);
+        const totalCell = document.createElement('td');
+        let totalIssues = getCountValue('critical') + getCountValue('serious');
+        if (hasIssueImpactValue(r, 'moderate')) totalIssues += getCountValue('moderate');
+        if (hasIssueImpactValue(r, 'minor')) totalIssues += getCountValue('minor');
+        totalCell.textContent = String(totalIssues);
+        tr.appendChild(totalCell);
+      }
 
       const runCell = document.createElement('td');
       runCell.textContent = r.lastRun ? r.lastRun.toLocaleString() : '';
@@ -5595,7 +6627,8 @@
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
-    appendTableWithDownload(content, table, { filenameBase: 'scan-drilldown', buttonLabel: 'Download CSV' });
+    appendTableWithDownload(content, table, { filenameBase: downloadBase, buttonLabel: 'Download CSV' });
+  appendMonitorApiFootnote(content);
     dialog.appendChild(content);
 
     const footer = document.createElement('div');
@@ -5741,7 +6774,12 @@
         if (options.openDialog) {
           options.openDialog(sorted);
         } else {
-          openScansListDialog(context, sorted, () => refreshMainView({ preserveState: true }));
+          openScansListDialog(
+            context,
+            sorted,
+            () => refreshMainView({ preserveState: true }),
+            options.dialogOptions || {}
+          );
         }
       } catch (e) {
         alert(e.message);
@@ -5911,7 +6949,7 @@
     return table;
   }
 
-  function appendBandDownloadButton(target, rows, { filenameBase, label, columns, bandOrder, rowFilter, groupLabel } = {}) {
+  function appendBandDownloadButton(target, rows, { filenameBase, label, columns, bandOrder, rowFilter, groupLabel, metricsType = 'issues' } = {}) {
     if (!target || !Array.isArray(rows) || !rows.length) return;
     const toolbar = document.createElement('div');
     toolbar.className = 'a11y-table-toolbar';
@@ -5924,7 +6962,10 @@
         // If bandOrder and rowFilter are provided, export detailed scan data
         if (bandOrder && typeof rowFilter === 'function') {
           const data = await refreshMainView({ preserveState: true });
-          const sourceRows = data.filtered || [];
+          const usePageMetrics = metricsType === 'pages';
+          const sourceRows = usePageMetrics
+            ? (data.pagesSummary?.filtered || [])
+            : (data.filtered || []);
           const allBandScans = [];
           
           // Collect all scans from each band
@@ -5936,6 +6977,7 @@
               const groupLabelValue = typeof bandItem === 'string' ? 
                 (groupLabel || '') : 
                 (bandItem.type || groupLabel || '');
+              const metricsCounts = usePageMetrics ? getPageImpactCounts(scan) : getIssueImpactCounts(scan);
               
               allBandScans.push({
                 band: bandLabel,
@@ -5945,10 +6987,10 @@
                 domain: scan.domain || '',
                 status: scan.statusText || '',
                 score: scan.scoreVal != null ? scan.scoreVal : '',
-                critical: scan.crit != null ? scan.crit : '',
-                serious: scan.serious != null ? scan.serious : '',
-                moderate: scan.moderate != null ? scan.moderate : '',
-                minor: scan.minor != null ? scan.minor : '',
+                critical: metricsCounts.critical != null ? metricsCounts.critical : '',
+                serious: metricsCounts.serious != null ? metricsCounts.serious : '',
+                moderate: metricsCounts.moderate != null ? metricsCounts.moderate : '',
+                minor: metricsCounts.minor != null ? metricsCounts.minor : '',
                 total: scan.total != null ? scan.total : '',
                 pages: scan.pages != null ? scan.pages : '',
                 lastRun: scan.lastRun ? scan.lastRun.toISOString() : '',
@@ -6083,42 +7125,40 @@
   function buildScanMetricsTable(rows, { includeSumRow = false } = {}) {
     const table = document.createElement('table');
     table.className = 'a11y-scan-report-table';
-    
-    // Get active impact keys to determine which columns to show
-    const activeImpacts = getActivePageImpactKeys();
-    const impactColumns = pageImpactFilterOptions.filter(opt => activeImpacts.includes(opt.key));
-    
+
+    const impactColumns = pageImpactFilterOptions.slice();
+    const activeImpacts = new Set(getActivePageImpactKeys());
+
     const thead = document.createElement('thead');
     const hr = document.createElement('tr');
-    
-    // Scan name column
+
     const scanTh = document.createElement('th');
     scanTh.textContent = 'Scan';
     scanTh.setAttribute('scope','col');
     hr.appendChild(scanTh);
-    
-    // Individual impact columns (only active ones)
+
     impactColumns.forEach(impact => {
       const th = document.createElement('th');
-      th.textContent = impact.label;
+      th.textContent = requiresMonitorApiImpact(impact.key) ? `${impact.label}*` : impact.label;
       th.setAttribute('scope','col');
       hr.appendChild(th);
     });
-    
-    // Summary columns
+
     ['Total of selected impacts','Total of all issues'].forEach(t => {
       const th = document.createElement('th');
       th.textContent = t;
       th.setAttribute('scope','col');
       hr.appendChild(th);
     });
-    
+
     thead.appendChild(hr);
     table.appendChild(thead);
 
     const tbody = document.createElement('tbody');
     const impactTotals = {};
-    impactColumns.forEach(impact => { impactTotals[impact.key] = 0; });
+    impactColumns.forEach(impact => {
+      impactTotals[impact.key] = { value: 0, hasData: !requiresMonitorApiImpact(impact.key) };
+    });
     let selectedTotal = 0;
     let issuesTotal = 0;
 
@@ -6129,80 +7169,100 @@
       nameCell.appendChild(createScanLink(scan));
       tr.appendChild(nameCell);
 
-      const filtered = getFilteredIssueImpactCounts(scan);
-      let selTotal = 0;
-      
-      // Add cells for each active impact
+  const counts = getIssueImpactCounts(scan);
+  const getCountValue = key => Math.max(0, coerceNumber(counts[key], 0));
+  let rowSelectedTotal = 0;
+  let rowAllIssues = getCountValue('critical') + getCountValue('serious');
+
       impactColumns.forEach(impact => {
-        const count = filtered[impact.key] || 0;
-        impactTotals[impact.key] += count;
-        selTotal += count;
-        
-        const cell = document.createElement('td');
-        cell.textContent = String(count);
-        tr.appendChild(cell);
+        const td = document.createElement('td');
+        const needsApi = requiresMonitorApiImpact(impact.key);
+        const hasValue = !needsApi || hasIssueImpactValue(scan, impact.key);
+        if (hasValue) {
+          const value = getCountValue(impact.key);
+          td.textContent = String(value);
+          if (activeImpacts.has(impact.key)) {
+            rowSelectedTotal += value;
+          }
+          impactTotals[impact.key].value += value;
+          impactTotals[impact.key].hasData = true;
+          if (impact.key === 'moderate' || impact.key === 'minor') {
+            rowAllIssues += value;
+          }
+        } else {
+          td.textContent = '-';
+        }
+        tr.appendChild(td);
       });
-      
-      const allIssues = getRowTotalIssues(scan);
-      selectedTotal += selTotal;
-      issuesTotal += allIssues;
+
+      selectedTotal += rowSelectedTotal;
+      issuesTotal += rowAllIssues;
 
       const selCell = document.createElement('td');
-      selCell.textContent = String(selTotal);
+      selCell.textContent = String(rowSelectedTotal);
       tr.appendChild(selCell);
 
       const totalCell = document.createElement('td');
-      totalCell.textContent = String(allIssues);
+      totalCell.textContent = String(rowAllIssues);
       tr.appendChild(totalCell);
 
       tbody.appendChild(tr);
     });
 
     if (includeSumRow) {
-      const tr = document.createElement('tr');
-      tr.className = 'a11y-table-sum-row';
+      const sumRow = document.createElement('tr');
+      sumRow.className = 'a11y-table-sum-row';
       const labelCell = document.createElement('th');
       labelCell.setAttribute('scope','row');
       labelCell.textContent = 'Total';
-      tr.appendChild(labelCell);
+      sumRow.appendChild(labelCell);
 
-      // Add total cells for each active impact
       impactColumns.forEach(impact => {
-        const cell = document.createElement('td');
-        cell.textContent = String(impactTotals[impact.key]);
-        tr.appendChild(cell);
+        const td = document.createElement('td');
+        const totalInfo = impactTotals[impact.key];
+        td.textContent = totalInfo.hasData ? String(totalInfo.value) : '-';
+        sumRow.appendChild(td);
       });
 
       const selCell = document.createElement('td');
       selCell.textContent = String(selectedTotal);
-      tr.appendChild(selCell);
+      sumRow.appendChild(selCell);
 
       const totalCell = document.createElement('td');
       totalCell.textContent = String(issuesTotal);
-      tr.appendChild(totalCell);
+      sumRow.appendChild(totalCell);
 
-      tbody.appendChild(tr);
+      tbody.appendChild(sumRow);
     }
 
     table.appendChild(tbody);
     return table;
   }
 
+  function appendMonitorApiFootnote(target) {
+    if (!target) return;
+    if (target.querySelector('[data-monitor-api-footnote="true"]')) return;
+    const note = document.createElement('p');
+    note.className = 'a11y-monitor-api-footnote';
+    note.dataset.monitorApiFootnote = 'true';
+    note.style.fontSize = '11px';
+    note.style.margin = '4px 0 0';
+    note.textContent = monitorApiFootnoteText;
+    target.appendChild(note);
+  }
+
   function buildPagesMetricsTable(rows, { includeSumRow = false } = {}) {
     const table = document.createElement('table');
     table.className = 'a11y-scan-report-table';
+    const activeImpacts = getActivePageImpactKeys();
+    const impactColumns = pageImpactFilterOptions.filter(opt => activeImpacts.includes(opt.key));
+
     const thead = document.createElement('thead');
     const hr = document.createElement('tr');
-    [
-      'Scan',
-      'Pages with Critical issues',
-      'Pages with Serious issues',
-      'Pages with Moderate issues',
-      'Pages with Minor issues',
-      'Total pages with selected impacts'
-    ].forEach(t => {
+    const headers = ['Scan', ...impactColumns.map(opt => `Pages with ${opt.label} issues`), 'Total pages with selected impacts'];
+    headers.forEach(text => {
       const th = document.createElement('th');
-      th.textContent = t;
+      th.textContent = text;
       th.setAttribute('scope','col');
       hr.appendChild(th);
     });
@@ -6210,45 +7270,34 @@
     table.appendChild(thead);
 
     const tbody = document.createElement('tbody');
-    let critTotal = 0;
-    let seriousTotal = 0;
-    let moderateTotal = 0;
-    let minorTotal = 0;
+    const impactTotals = {};
+    impactColumns.forEach(opt => {
+      impactTotals[opt.key] = 0;
+    });
+    let selectedTotal = 0;
 
     rows.forEach(scan => {
       const counts = getFilteredPageImpactCounts(scan);
-      const totalPages = counts.critical + counts.serious + counts.moderate + counts.minor;
-      critTotal += counts.critical;
-      seriousTotal += counts.serious;
-      moderateTotal += counts.moderate;
-      minorTotal += counts.minor;
-
       const tr = document.createElement('tr');
       const nameCell = document.createElement('th');
       nameCell.setAttribute('scope','row');
       nameCell.appendChild(createScanLink(scan));
       tr.appendChild(nameCell);
 
-      const critCell = document.createElement('td');
-      critCell.textContent = String(counts.critical);
-      tr.appendChild(critCell);
-
-      const seriousCell = document.createElement('td');
-      seriousCell.textContent = String(counts.serious);
-      tr.appendChild(seriousCell);
-
-      const moderateCell = document.createElement('td');
-      moderateCell.textContent = String(counts.moderate);
-      tr.appendChild(moderateCell);
-
-      const minorCell = document.createElement('td');
-      minorCell.textContent = String(counts.minor);
-      tr.appendChild(minorCell);
+      let rowSelectedTotal = 0;
+      impactColumns.forEach(opt => {
+        const count = counts[opt.key] || 0;
+        impactTotals[opt.key] += count;
+        rowSelectedTotal += count;
+        const td = document.createElement('td');
+        td.textContent = String(count);
+        tr.appendChild(td);
+      });
 
       const totalCell = document.createElement('td');
-      totalCell.textContent = String(totalPages);
+      totalCell.textContent = String(rowSelectedTotal);
       tr.appendChild(totalCell);
-
+      selectedTotal += rowSelectedTotal;
       tbody.appendChild(tr);
     });
 
@@ -6259,20 +7308,15 @@
       labelCell.setAttribute('scope','row');
       labelCell.textContent = 'Total';
       tr.appendChild(labelCell);
-      const critCell = document.createElement('td');
-      critCell.textContent = String(critTotal);
-      tr.appendChild(critCell);
-      const seriousCell = document.createElement('td');
-      seriousCell.textContent = String(seriousTotal);
-      tr.appendChild(seriousCell);
-      const moderateCell = document.createElement('td');
-      moderateCell.textContent = String(moderateTotal);
-      tr.appendChild(moderateCell);
-      const minorCell = document.createElement('td');
-      minorCell.textContent = String(minorTotal);
-      tr.appendChild(minorCell);
+
+      impactColumns.forEach(opt => {
+        const td = document.createElement('td');
+        td.textContent = String(impactTotals[opt.key] || 0);
+        tr.appendChild(td);
+      });
+
       const totalCell = document.createElement('td');
-      totalCell.textContent = String(critTotal + seriousTotal + moderateTotal + minorTotal);
+      totalCell.textContent = String(selectedTotal);
       tr.appendChild(totalCell);
       tbody.appendChild(tr);
     }
@@ -6328,6 +7372,9 @@
 
     if (pageContext === 'scans') {
       syncPageHealthAvailability(filtered);
+      lastRenderedData = data;
+    } else {
+      lastRenderedData = null;
     }
 
     const scoreBandOrder = bucketLabels;
@@ -6348,9 +7395,101 @@
       pageRowsByType[row.type].push(row);
     });
     const pageDomainAggregates = pageDataAvailable ? aggregatePageDomains(pageRowsQualified) : new Map();
-    const activeImpactKeys = getActivePageImpactKeys();
-    const impactFilterLabel = formatPageImpactSelection(activeImpactKeys);
-    const impactHeadingSuffix = impactFilterLabel ? ` (Impact: ${impactFilterLabel})` : '';
+  const activeImpactKeys = getActivePageImpactKeys();
+  const activeImpactSet = new Set(activeImpactKeys);
+  const impactFilterLabel = formatPageImpactSelection(activeImpactKeys);
+  const sourceLabel = getPageImpactSourceLabel();
+  const impactHeadingSuffixParts = [];
+  if (impactFilterLabel) impactHeadingSuffixParts.push(`Impact: ${impactFilterLabel}`);
+  if (sourceLabel) impactHeadingSuffixParts.push(`Source: ${sourceLabel}`);
+  const impactHeadingSuffix = impactHeadingSuffixParts.length ? ` (${impactHeadingSuffixParts.join(' | ')})` : '';
+  const impactSelectionDescriptor = impactFilterLabel || 'All impacts';
+  pageImpactFilterState.headingSuffix = impactHeadingSuffix;
+  if (typeof window !== 'undefined') {
+    window.impactHeadingSuffix = impactHeadingSuffix;
+  }
+
+    const severityChipTemplates = {
+      critical: `<span class="a17e98589504 a11y-severity-chip"><div class="c2adf923ed89 e2de49808a35"><span aria-hidden="true" class="Icon Icon--chevron-double-up Icon__up"><svg overflow="visible" preserveAspectRatio="none" viewBox="0 0 24 24" height="24" width="24"><path d="M17.2 11.84a.35.35 0 0 0-.1-.24l-.52-.52a.332.332 0 0 0-.47-.01l-.01.01-4.1 4.1-4.09-4.1a.332.332 0 0 0-.47-.01l-.01.01-.52.52c-.13.13-.14.33-.01.47l.01.01 4.85 4.85c.13.13.33.14.47.01l.01-.01 4.85-4.85c.06-.06.1-.15.1-.24h.01zm0-4a.35.35 0 0 0-.1-.24l-.52-.52a.332.332 0 0 0-.47-.01l-.01.01-4.1 4.1-4.09-4.09a.333.333 0 0 0-.47-.02l-.01.01-.52.53a.32.32 0 0 0-.02.46l.01.01 4.85 4.85c.13.13.33.14.47.01l.01-.01 4.85-4.85c.06-.06.1-.15.1-.24h.02z" fill="currentColor" vector-effect="non-scaling-stroke"></path></svg></span><span class="Offscreen">Critical</span></div> Critical</span>`,
+      serious: `<span class="a17e98589504 a11y-severity-chip"><div class="c2adf923ed89 c1d7b29a41e0"><span aria-hidden="true" class="Icon Icon--chevron-up Icon__up"><svg overflow="visible" preserveAspectRatio="none" viewBox="0 0 24 24" height="24" width="24"><path d="M17.2 9.84a.35.35 0 0 0-.1-.24l-.52-.52a.332.332 0 0 0-.47-.01l-.01.01-4.1 4.1-4.09-4.1a.333.333 0 0 0-.47-.02l-.01.01-.52.53c-.13.13-.14.33-.01.47l.01.01 4.85 4.85c.13.13.33.14.47.01l.01-.01 4.85-4.85c.06-.06.1-.15.1-.24h.01z" fill="currentColor" vector-effect="non-scaling-stroke"></path></svg></span><span class="Offscreen">Serious</span></div> Serious</span>`,
+      moderate: `<span class="a17e98589504 a11y-severity-chip"><div class="c2adf923ed89 a99bd1117bc5"><span aria-hidden="true" class="Icon Icon--chevron-down Icon__down"><svg overflow="visible" preserveAspectRatio="none" viewBox="0 0 24 24" height="24" width="24"><path d="M17.2 9.84a.35.35 0 0 0-.1-.24l-.52-.52a.332.332 0 0 0-.47-.01l-.01.01-4.1 4.1-4.09-4.1a.333.333 0 0 0-.47-.02l-.01.01-.52.53c-.13.13-.14.33-.01.47l.01.01 4.85 4.85c.13.13.33.14.47.01l.01-.01 4.85-4.85c.06-.06.1-.15.1-.24h.01z" fill="currentColor" vector-effect="non-scaling-stroke"></path></svg></span><span class="Offscreen">Moderate</span></div> Moderate</span>`,
+      minor: `<span class="a17e98589504 a11y-severity-chip"><div class="c2adf923ed89 f55e216514d1"><span aria-hidden="true" class="Icon Icon--chevron-double-down Icon__down"><svg overflow="visible" preserveAspectRatio="none" viewBox="0 0 24 24" height="24" width="24"><path d="M17.2 11.84a.35.35 0 0 0-.1-.24l-.52-.52a.332.332 0 0 0-.47-.01l-.01.01-4.1 4.1-4.09-4.1a.332.332 0 0 0-.47-.01l-.01.01-.52.52c-.13.13-.14.33-.01.47l.01.01 4.85 4.85c.13.13.33.14.47.01l.01-.01 4.85-4.85c.06-.06.1-.15.1-.24h.01zm0-4a.35.35 0 0 0-.1-.24l-.52-.52a.332.332 0 0 0-.47-.01l-.01.01-4.1 4.1-4.09-4.09a.333.333 0 0 0-.47-.02l-.01.01-.52.53a.32.32 0 0 0-.02.46l.01.01 4.85 4.85c.13.13.33.14.47.01l.01-.01 4.85-4.85c.06-.06.1-.15.1-.24h.02z" fill="currentColor" vector-effect="non-scaling-stroke"></path></svg></span><span class="Offscreen">Minor</span></div> Minor</span>`
+    };
+
+    const createChipFromHtml = html => {
+      const template = document.createElement('template');
+      template.innerHTML = html.trim();
+      return template.content.firstElementChild;
+    };
+
+    const createSeverityChip = key => {
+      const markup = severityChipTemplates[key];
+      if (!markup) return null;
+      const node = createChipFromHtml(markup);
+      if (node) node.style.pointerEvents = 'none';
+      return node;
+    };
+
+    const createSourceChip = () => {
+      const sourceKey = getPageImpactSource();
+      if (sourceKey === 'api' && !isMonitorApiDataReady()) return null;
+      const option = pageImpactSourceOptions.find(entry => entry.key === sourceKey);
+      if (!option) return null;
+      const text = option.shortLabel || option.label || sourceKey;
+      const span = document.createElement('span');
+      span.className = 'a11y-source-chip';
+      span.textContent = text;
+      span.setAttribute('aria-label', `Source: ${option.label || text}`);
+      span.style.display = 'inline-flex';
+      span.style.alignItems = 'center';
+      span.style.fontSize = '12px';
+      span.style.fontWeight = '600';
+      span.style.padding = '2px 10px';
+      span.style.borderRadius = '999px';
+      span.style.pointerEvents = 'none';
+      const palette = sourceKey === 'api'
+        ? { bg: '#d1fae5', color: '#065f46' }
+        : { bg: '#ecfdf5', color: '#065f46' };
+      span.style.background = palette.bg;
+      span.style.color = palette.color;
+      span.style.border = '1px solid rgba(15,23,42,0.08)';
+      return span;
+    };
+
+    const createMonitorApiStatusMetaChip = () => {
+      if (getPageImpactSource() !== 'api') return null;
+      const coverage = getPageImpactApiCoverage();
+      if (!coverage.total || coverage.missing <= 0) return null;
+      const chip = document.createElement('span');
+      chip.className = 'a11y-page-impact-api-chip a11y-page-impact-api-chip--meta';
+      chip.style.background = '#fff7ed';
+      chip.style.color = '#9a3412';
+      chip.style.pointerEvents = 'none';
+      chip.style.cursor = 'default';
+      chip.dataset.status = 'missing';
+      chip.setAttribute('aria-label', `API data missing for ${coverage.missing} of ${coverage.total} scans.`);
+      renderMonitorApiChipContent(chip, 'API data • missing', { interactive: false });
+      return chip;
+    };
+
+    const buildImpactSummaryMeta = () => {
+      const chips = [];
+      pageImpactFilterOptions.forEach(option => {
+        if (activeImpactSet.has(option.key)) {
+          const chip = createSeverityChip(option.key);
+          if (chip) chips.push(chip);
+        }
+      });
+      const apiStatusChip = createMonitorApiStatusMetaChip();
+      if (apiStatusChip) chips.push(apiStatusChip);
+      const sourceChip = createSourceChip();
+      if (sourceChip) chips.push(sourceChip);
+      if (!chips.length) return null;
+      const wrap = document.createElement('div');
+      wrap.className = 'a11y-impact-meta-chips';
+      chips.forEach(chip => wrap.appendChild(chip));
+      return wrap;
+    };
     const rowLookup = buildRowLookup(rows);
     ensureWasConfigDefaults();
     wasRuntimeContext = { rowLookup };
@@ -6360,6 +7499,14 @@
     body.setAttribute('tabindex','0');
     pageImpactFilterState.button = null;
     pageImpactFilterState.summaryEl = null;
+    pageImpactFilterState.apiContainer = null;
+    pageImpactFilterState.apiStatusEl = null;
+    pageImpactFilterState.apiButton = null;
+    pageImpactFilterState.apiChip = null;
+  pageImpactFilterState.footerChipContainer = null;
+  pageImpactFilterState.footerApiChip = null;
+  pageImpactFilterState.footerInfoEl = null;
+  pageImpactFilterState.footerBaseTimestamp = '';
 
     const sectionsByTab = {
       status: [],
@@ -6370,13 +7517,22 @@
       quick: []
     };
 
-    const makeDetails = title => {
+    const makeDetails = (title, options = {}) => {
       const details = document.createElement('details');
       details.open = false;
       const summary = document.createElement('summary');
+      summary.className = 'a11y-accordion-summary';
+      summary.style.display = 'flex';
+      summary.style.flexWrap = 'wrap';
+      summary.style.alignItems = 'center';
+      summary.style.gap = '8px';
       const h2 = document.createElement('h2');
       h2.textContent = title;
       summary.appendChild(h2);
+      if (typeof options.appendMeta === 'function') {
+        const meta = options.appendMeta();
+        if (meta) summary.appendChild(meta);
+      }
       details.appendChild(summary);
       return details;
     };
@@ -6419,7 +7575,7 @@
     };
 
     const appendAverageScoreSection = (title, groups, contextPrefix) => {
-      const details = makeDetails(title);
+      const details = makeDetails(title, { appendMeta: buildImpactSummaryMeta });
       const entries = buildAverageScoreEntries(groups);
       if (!entries.length) {
         const p = document.createElement('p');
@@ -6596,7 +7752,7 @@
 
     // Score summary (all scans)
     {
-      const details = makeDetails('Score summary');
+      const details = makeDetails('Score summary', { appendMeta: buildImpactSummaryMeta });
       const total = Object.values(scoreAll).reduce((a,b)=>a+b,0);
       const summaryRows = renderScoreTable(
         details,
@@ -6627,7 +7783,7 @@
 
     // Score summary by type
     {
-      const details = makeDetails('Score by scan type');
+      const details = makeDetails('Score by scan type', { appendMeta: buildImpactSummaryMeta });
       const typeKeys = Object.keys(byType).sort();
       if (!typeKeys.length) {
         const p = document.createElement('p');
@@ -6706,9 +7862,10 @@
 
     // Issue impact bands
     {
-      const impactBandOrder = impactIssueBandOrder;
-      const impactMap = impactIssuesByType;
-      const details = makeDetails(`Issue impact bands${impactHeadingSuffix}`);
+  const impactBandOrder = impactIssueBandOrder;
+  const impactMap = impactIssuesByType;
+  const details = makeDetails('Issue impact bands', { appendMeta: buildImpactSummaryMeta });
+  const issueBandColumnLabel = `Band (Impacts: ${impactSelectionDescriptor})`;
       const types = Object.keys(impactMap).sort();
       const bandDownloadRows = [];
       if (!types.length) {
@@ -6732,7 +7889,7 @@
           table.className = 'a11y-scan-report-table';
           const thead = document.createElement('thead');
           const hr = document.createElement('tr');
-          ['Band (selected impact issues)','Scans','Percent'].forEach(t => {
+          [issueBandColumnLabel,'Scans','Percent'].forEach(t => {
             const th = document.createElement('th');
             th.textContent = t;
             th.setAttribute('scope','col');
@@ -6749,7 +7906,8 @@
             const tr = document.createElement('tr');
             const tdBand = document.createElement('th');
             tdBand.setAttribute('scope','row');
-            tdBand.textContent = `${band} issues`;
+            const bandLabel = `${band} issues`;
+            tdBand.textContent = bandLabel;
             tr.appendChild(tdBand);
             const tdScans = document.createElement('td');
             const context = `${band} - Issue impact bands - ${type}`;
@@ -6782,7 +7940,7 @@
 
             bandDownloadRows.push({
               group: type,
-              band: `${band} issues`,
+              band: bandLabel,
               count,
               percent: pctNum.toFixed(1)
             });
@@ -6818,7 +7976,7 @@
           groupLabel: 'Issue Impact',
           columns: [
             { key: 'group', label: 'Scan type' },
-            { key: 'band', label: 'Band' },
+            { key: 'band', label: issueBandColumnLabel },
             { key: 'count', label: 'Scans' },
             { key: 'percent', label: 'Percent' }
           ]
@@ -6829,7 +7987,7 @@
 
     // Critical + Serious counts by type
     {
-      const details = makeDetails(`Scan Type - Issue counts${impactHeadingSuffix}`);
+  const details = makeDetails('Scan Type - Issue counts', { appendMeta: buildImpactSummaryMeta });
       const grouped = {};
       filtered
         .filter(r => r.statusKey === 'Complete' && (typeof r.crit === 'number' || typeof r.serious === 'number' || typeof r.total === 'number'))
@@ -6843,6 +8001,7 @@
         p.textContent = 'No Complete scans with Critical or Serious counts in the current filter set.';
         details.appendChild(p);
       } else {
+        let hasTable = false;
         types.forEach(type => {
           const scans = sortScans(grouped[type], 'critSerDesc');
           if (!scans.length) return;
@@ -6851,20 +8010,25 @@
           details.appendChild(h3);
           const table = buildScanMetricsTable(scans, { includeSumRow: false });
           appendTableWithDownload(details, table, { filenameBase: `critical-serious-${sanitizeFilename(type)}` });
+          hasTable = true;
         });
+        if (hasTable) {
+          appendMonitorApiFootnote(details);
+        }
       }
       pushSection('issues', details);
     }
 
     // Critical + Serious counts by domain (per scan rows + totals)
     {
-      const details = makeDetails(`Domain - Issue counts${impactHeadingSuffix}`);
+  const details = makeDetails('Domain - Issue counts', { appendMeta: buildImpactSummaryMeta });
       if (!domainHierarchy.length) {
         const p = document.createElement('p');
         p.textContent = 'No domain information available.';
         details.appendChild(p);
       } else {
         let hasDomainData = false;
+        let hasTable = false;
         domainHierarchy.forEach(entry => {
           const heading = document.createElement('h3');
           heading.textContent = entry.label;
@@ -6887,11 +8051,14 @@
           const sorted = sortScans(scans, 'critSerDesc');
           const table = buildScanMetricsTable(sorted, { includeSumRow: true });
           appendTableWithDownload(details, table, { filenameBase: `critical-serious-${sanitizeFilename(entry.label)}` });
+          hasTable = true;
         });
         if (!hasDomainData) {
           const p = document.createElement('p');
           p.textContent = 'No Complete scans with Critical or Serious counts for any domain in the current filter set.';
           details.appendChild(p);
+        } else if (hasTable) {
+          appendMonitorApiFootnote(details);
         }
       }
       pushSection('issues', details);
@@ -6917,7 +8084,9 @@
 
     // Page impact bands
     {
-      const details = makeDetails(`Page impact bands${impactHeadingSuffix}`);
+      const bandsHeading = 'Page impact bands';
+      const details = makeDetails(bandsHeading, { appendMeta: buildImpactSummaryMeta });
+      const pageBandColumnLabel = `Band (Pages • Impacts: ${impactSelectionDescriptor})`;
       const types = pageDataAvailable ? Object.keys(pageRowsByType).sort() : [];
       const bandDownloadRows = [];
       if (!pageDataAvailable || !types.length) {
@@ -6943,7 +8112,7 @@
           table.className = 'a11y-scan-report-table';
           const thead = document.createElement('thead');
           const hr = document.createElement('tr');
-          ['Band (pages with selected impacts)','Scans','Percent'].forEach(t => {
+          [pageBandColumnLabel,'Scans','Percent'].forEach(t => {
             const th = document.createElement('th');
             th.textContent = t;
             th.setAttribute('scope','col');
@@ -6981,7 +8150,8 @@
                   );
                 },
                 sortMode: 'nameOnly',
-                context: 'impact'
+                    context: 'impact',
+                    dialogOptions: { mode: 'pages', filenameBase: 'page-impact-drilldown' }
               }
             );
             tdScans.appendChild(btn);
@@ -7037,9 +8207,10 @@
             getPageTotal(row) > 0 &&
             getImpactBandPages(getPageTotal(row)) === typeBand.band,
           groupLabel: 'Page Impact',
+          metricsType: 'pages',
           columns: [
             { key: 'group', label: 'Scan type' },
-            { key: 'band', label: 'Band' },
+            { key: 'band', label: pageBandColumnLabel },
             { key: 'count', label: 'Scans' },
             { key: 'percent', label: 'Percent' }
           ]
@@ -7050,7 +8221,7 @@
 
     // Scan Type - Pages with issues (selected impacts)
     {
-      const details = makeDetails(`Scan Type - Pages with issues${impactHeadingSuffix}`);
+      const details = makeDetails('Scan Type - Pages with issues', { appendMeta: buildImpactSummaryMeta });
       if (!pageRowsQualified.length) {
         const p = document.createElement('p');
         p.textContent = 'No Complete scans with pages in the selected impact filter.';
@@ -7077,7 +8248,7 @@
 
     // Domain - Pages with issues (selected impacts)
     {
-      const details = makeDetails(`Domain - Pages with issues${impactHeadingSuffix}`);
+      const details = makeDetails('Domain - Pages with issues', { appendMeta: buildImpactSummaryMeta });
       if (!pageDataAvailable || !domainHierarchy.length || !pageRowsQualified.length) {
         const p = document.createElement('p');
         p.textContent = 'No domain information available for the selected impact filter.';
@@ -7233,6 +8404,10 @@
       if (!rows || !rows.length) return null;
       let crit = 0;
       let serious = 0;
+      let moderate = 0;
+      let minor = 0;
+      let moderateComplete = true;
+      let minorComplete = true;
       let totalIssues = 0;
       let scoreSum = 0;
       let scoreCount = 0;
@@ -7240,6 +8415,17 @@
         crit += getRowCritical(row);
         serious += getRowSerious(row);
         totalIssues += getRowTotalIssues(row);
+        const counts = getIssueImpactCounts(row);
+        if (hasIssueImpactValue(row, 'moderate')) {
+          moderate += Math.max(0, coerceNumber(counts.moderate, 0));
+        } else {
+          moderateComplete = false;
+        }
+        if (hasIssueImpactValue(row, 'minor')) {
+          minor += Math.max(0, coerceNumber(counts.minor, 0));
+        } else {
+          minorComplete = false;
+        }
         if (Number.isFinite(row.scoreVal)) {
           scoreSum += row.scoreVal;
           scoreCount += 1;
@@ -7250,6 +8436,8 @@
         label,
         crit,
         serious,
+        moderate: moderateComplete ? moderate : null,
+        minor: minorComplete ? minor : null,
         totalCs,
         totalIssues,
         avgScore: scoreCount ? scoreSum / scoreCount : null,
@@ -7291,7 +8479,7 @@
         mode === 'domain' ? 'Domain' :
         mode === 'website' ? 'Website' :
         'Type';
-      const details = makeDetails(modeLabel);
+  const details = makeDetails(modeLabel, { appendMeta: buildImpactSummaryMeta });
       const entries = buildRankingEntries(mode);
       if (!entries.length) {
         const p = document.createElement('p');
@@ -7329,7 +8517,7 @@
       table.className = 'a11y-scan-report-table';
       const thead = document.createElement('thead');
       const hr = document.createElement('tr');
-      ['Rank', columnLabel, 'Score', 'Critical', 'Serious', 'Total Critical + Serious', 'Total of all issues'].forEach(t => {
+      ['Rank', columnLabel, 'Score', 'Critical', 'Serious', 'Moderate*', 'Minor*', 'Total Critical + Serious', 'Total of all issues'].forEach(t => {
         const th = document.createElement('th');
         th.textContent = t;
         th.setAttribute('scope','col');
@@ -7373,6 +8561,12 @@
         const seriousCell = document.createElement('td');
         seriousCell.textContent = String(entry.serious);
         tr.appendChild(seriousCell);
+  const moderateCell = document.createElement('td');
+  moderateCell.textContent = Number.isFinite(entry.moderate) ? String(entry.moderate) : '-';
+  tr.appendChild(moderateCell);
+  const minorCell = document.createElement('td');
+  minorCell.textContent = Number.isFinite(entry.minor) ? String(entry.minor) : '-';
+  tr.appendChild(minorCell);
         const csCell = document.createElement('td');
         csCell.textContent = String(entry.totalCs);
         tr.appendChild(csCell);
@@ -7383,6 +8577,7 @@
       });
       table.appendChild(tbody);
       appendTableWithDownload(details, table, { filenameBase: `${mode}-ranking` });
+      appendMonitorApiFootnote(details);
       return details;
     }
 
@@ -7426,7 +8621,7 @@
       table.className = 'a11y-scan-report-table';
       const thead = document.createElement('thead');
       const hr = document.createElement('tr');
-      ['Rank','Scan','Score','Critical','Serious','Total Critical + Serious','Total of all issues'].forEach(t => {
+      ['Rank','Scan','Score','Critical','Serious','Moderate*','Minor*','Total Critical + Serious','Total of all issues'].forEach(t => {
         const th = document.createElement('th');
         th.textContent = t;
         th.setAttribute('scope','col');
@@ -7458,6 +8653,19 @@
         seriousCell.textContent = String(getRowSerious(row));
         tr.appendChild(seriousCell);
 
+        const moderateCell = document.createElement('td');
+        const issueCounts = getIssueImpactCounts(row);
+        const formatOptionalIssue = key => {
+          if (!hasIssueImpactValue(row, key)) return '-';
+          return String(Math.max(0, coerceNumber(issueCounts[key], 0)));
+        };
+        moderateCell.textContent = formatOptionalIssue('moderate');
+        tr.appendChild(moderateCell);
+
+        const minorCell = document.createElement('td');
+        minorCell.textContent = formatOptionalIssue('minor');
+        tr.appendChild(minorCell);
+
         const csCell = document.createElement('td');
         csCell.textContent = String(getRowCritical(row) + getRowSerious(row));
         tr.appendChild(csCell);
@@ -7473,7 +8681,7 @@
     }
 
     function buildRankingByTypeDetails() {
-      const details = makeDetails('Ranking by type');
+      const details = makeDetails('Ranking by type', { appendMeta: buildImpactSummaryMeta });
       const grouped = new Map();
       completeRows.forEach(row => {
         if (!grouped.has(row.type)) grouped.set(row.type, []);
@@ -7494,6 +8702,7 @@
         details.appendChild(h3);
         const table = buildTypeRankingTable(ranked);
         appendTableWithDownload(details, table, { filenameBase: `ranking-${sanitizeFilename(type)}` });
+        appendMonitorApiFootnote(details);
       });
       return details;
     }
@@ -7651,17 +8860,16 @@
     });
 
     if (pageContext === 'scans') {
-      lastRenderedData = data;
       renderRefreshFooter(footer, now, body, updateFilterButtonLabel);
       if (updateFilterButtonLabel) updateFilterButtonLabel(data);
     } else {
-      lastRenderedData = null;
       footer.innerHTML = '';
       const note = document.createElement('p');
       note.className = 'a11y-quick-actions-note';
       note.textContent = 'Quick Actions run against the active Issues results on this page.';
       footer.appendChild(note);
     }
+    updatePageImpactSourceControls();
   }
 
   function buildWasSection(rowLookup) {
@@ -11143,12 +12351,34 @@
   function renderRefreshFooter(footer, now, body, updateFilterButtonLabel) {
     if (!footer) return;
     footer.innerHTML = '';
+    pageImpactFilterState.footerChipContainer = null;
+    pageImpactFilterState.footerApiChip = null;
+    pageImpactFilterState.footerInfoEl = null;
+
+    const statusRow = document.createElement('div');
+    statusRow.className = 'a11y-refresh-status-row';
+
+    const chipsWrap = document.createElement('div');
+    chipsWrap.className = 'a11y-footer-chip-wrap';
+    const footerChip = createMonitorApiChipElement();
+    chipsWrap.appendChild(footerChip);
+    statusRow.appendChild(chipsWrap);
 
     const info = document.createElement('div');
     info.className = 'a11y-scan-report-refresh-info';
     info.id = 'a11y-scan-refresh-info';
     info.setAttribute('tabindex','-1');
-    info.textContent = `Last data refresh: ${now.toLocaleString()}`;
+    statusRow.appendChild(info);
+
+    footer.appendChild(statusRow);
+
+    pageImpactFilterState.footerChipContainer = chipsWrap;
+    pageImpactFilterState.footerApiChip = footerChip;
+    pageImpactFilterState.footerInfoEl = info;
+
+    const refreshDate = now instanceof Date ? now : new Date(now || Date.now());
+    setFooterBaseTimestamp(refreshDate.toLocaleString());
+    setFooterRefreshMessage();
 
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -11156,6 +12386,9 @@
     btn.textContent = 'Refresh data';
     btn.addEventListener('click', async () => {
       try {
+        if (getPageImpactSource() === 'api') {
+          await requestPageImpactApiData({ mode: 'reload' });
+        }
         await refreshMainView({ preserveState: true });
         const focusTarget = footer.querySelector('#a11y-scan-refresh-info');
         if (focusTarget) focusTarget.focus();
@@ -11164,8 +12397,8 @@
       }
     });
 
-    footer.appendChild(info);
     footer.appendChild(btn);
+    updatePageImpactApiControls();
   }
 
   // --- Filter modal ---
@@ -11819,6 +13052,10 @@
       const filterHolder = document.createElement('div');
       filterHolder.className = 'a11y-header-filter-holder';
       filterHolder.appendChild(filterBtn);
+      const sourceToggle = buildPageImpactSourceToggleControl();
+      if (sourceToggle) {
+        filterHolder.appendChild(sourceToggle);
+      }
       left.appendChild(filterHolder);
     }
 
@@ -11888,6 +13125,11 @@
       modalContext = null;
       pageImpactFilterState.button = null;
       pageImpactFilterState.summaryEl = null;
+      pageImpactFilterState.sourceSegment = null;
+      pageImpactFilterState.sourceButtons = null;
+      if (isScansDialog) {
+        setPageImpactSource(defaultPageImpactSource);
+      }
       logWidget('openModal closed', { dialogMode });
       if (lastFocused && lastFocused.focus) lastFocused.focus();
     }
@@ -11966,6 +13208,9 @@
 
     Object.keys(accordionStateByTab).forEach(key => { delete accordionStateByTab[key]; });
     currentTabKey = isScansDialog ? 'status' : 'quick';
+    if (isScansDialog) {
+      pageImpactFilterState.initialSourceEvaluated = false;
+    }
     const initialState = getDefaultAccordionState(currentTabKey);
     renderBody(body, data, updateFilterButtonLabel, footer, initialState);
     const activePanel = getActivePanelElement(body);
