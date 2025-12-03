@@ -163,6 +163,7 @@
     { key: 'minor', label: 'Minor' }
   ];
   const monitorApiOnlyImpactKeys = new Set(['moderate','minor']);
+  const pagesTabImpactKeys = new Set(['critical','serious']);
   const monitorApiFootnoteText = '* Moderate and Minor counts require data from the axe Monitor API.';
   const defaultPageImpactSelection = pageImpactFilterOptions.map(option => option.key);
   const pageImpactFilterStorageKey = 'a11y-page-impact-filter';
@@ -212,6 +213,79 @@
     initialSourceEvaluated: false
   };
   loadStoredPageImpactFilters();
+  const rankingCriteriaStorageKey = 'a11y-ranking-criteria';
+  const rankingFieldOptions = [
+    {
+      value: 'score',
+      label: 'Score (highest first)',
+      shortLabel: 'Score',
+      description: 'Prefers higher accessibility scores when ranking scans.',
+      default: true
+    },
+    {
+      value: 'totalCs',
+      label: 'Critical + Serious issues (fewest first)',
+      shortLabel: 'Critical + Serious',
+      description: 'Counts combined Critical and Serious issues for tie-breaking.',
+      default: true
+    },
+    {
+      value: 'critical',
+      label: 'Critical issues (fewest first)',
+      shortLabel: 'Critical issues',
+      description: 'Prefers scans with fewer Critical issues.',
+      default: true
+    },
+    {
+      value: 'serious',
+      label: 'Serious issues (fewest first)',
+      shortLabel: 'Serious issues',
+      description: 'Prefers scans with fewer Serious issues.',
+      default: true
+    },
+    {
+      value: 'moderate',
+      label: 'Moderate issues (fewest first)',
+      shortLabel: 'Moderate issues',
+      description: 'Requires Monitor API data to include Moderate issue counts.',
+      default: false,
+      requiresApi: true
+    },
+    {
+      value: 'minor',
+      label: 'Minor issues (fewest first)',
+      shortLabel: 'Minor issues',
+      description: 'Requires Monitor API data to include Minor issue counts.',
+      default: false,
+      requiresApi: true
+    },
+    {
+      value: 'totalIssues',
+      label: 'All issues (fewest first)',
+      shortLabel: 'All issues',
+      description: 'Uses the total of all available issue impacts. Moderate and Minor require the Monitor API.',
+      default: true
+    },
+    {
+      value: 'name',
+      label: 'Scan name (A → Z)',
+      shortLabel: 'Scan name',
+      description: 'Alphabetical by scan name as a final tiebreaker.',
+      default: true
+    }
+  ];
+  const rankingFieldLookup = new Map(rankingFieldOptions.map(option => [option.value, option]));
+  const rankingFallbackFields = ['name'];
+  const rankingState = {
+    criteria: null,
+    buttonId: `a11y-ranking-button-${Math.random().toString(36).slice(2)}`,
+    summaryId: `a11y-ranking-summary-${Math.random().toString(36).slice(2)}`,
+    dialogTitleId: `a11y-ranking-dialog-title-${Math.random().toString(36).slice(2)}`,
+    triggerButton: null,
+    summaryEl: null,
+    dialog: null,
+    lastTrigger: null
+  };
   const inertAttr = 'data-a11y-scan-report-inert';
   const issuesSectionHintSelector = '#main-content > div > div.ef72a1113bba > section > div.Panel__Content > section.bc6243444a96 > section';
   const pdfPanelHintSelector = '#main-content > div > div.ef72a1113bba > div';
@@ -242,45 +316,51 @@
   let currentFilters = { types: new Set(), domains: new Set(), statuses: new Set() }; // empty = all
   let currentSortMeta = { index: 0, direction: 'asc', field: 'name', type: 'text', label: 'scan name' };
   let currentTabKey = pageContext === 'issues' ? 'quick' : 'status';
+  function isPagesTabActive() {
+    return pageContext === 'scans' && currentTabKey === 'pages';
+  }
   const accordionStateByTab = {};
   const defaultWasReports = [
-    { name: 'Abu Dhabi', desktop: 'Abu Dhabi - Desktop', mobile: 'Abu Dhabi - Mobile', pdf: 'Abu Dhabi - PDF' },
-    { name: 'CAS', desktop: 'A&S - CAS - Desktop', mobile: 'A&S - CAS - Mobile', pdf: 'A&S - CAS - PDF' },
-    { name: 'GSAS', desktop: 'A&S - GSAS - Desktop', mobile: 'A&S - GSAS - Mobile', pdf: 'A&S - GSAS - PDF' },
-    { name: 'Liberal Studies', desktop: 'A&S - Liberal Studies - Desktop', mobile: 'A&S - Liberal Studies - Mobile', pdf: 'A&S - Liberal Studies - PDF' },
-    { name: 'A&S Main', desktop: 'A&S - Main - Desktop', mobile: 'A&S - Main - Mobile', pdf: 'A&S - Main - PDF' },
-    { name: 'CDS', desktop: 'CDS - Desktop', mobile: 'CDS - Mobile', pdf: 'CDS - PDF' },
-    { name: 'CAOS', desktop: 'Courant - CAOS - Desktop', mobile: 'Courant - CAOS - Mobile', pdf: 'Courant - CAOS - PDF' },
-    { name: 'CIMS', desktop: 'Courant - CIMS - Desktop', mobile: 'Courant - CIMS - Mobile', pdf: 'Courant - CIMS - PDF' },
-    { name: 'CS', desktop: 'Courant - CS - Desktop', mobile: 'Courant - CS - Mobile', pdf: 'Courant - CS - PDF' },
-    { name: 'Math', desktop: 'Courant - Math - Desktop', mobile: 'Courant - Math - Mobile', pdf: 'Courant - Math - PDF' },
-    { name: 'Dental', desktop: 'Dental - Desktop', mobile: 'Dental - Mobile', pdf: 'Dental - PDF' },
-    { name: 'Gallatin', desktop: 'Gallatin - Desktop', mobile: 'Gallatin - Mobile', pdf: 'Gallatin - PDF' },
-    { name: 'IFA', desktop: 'IFA - Desktop', mobile: 'IFA - Mobile', pdf: 'IFA - PDF' },
-    { name: 'ISAW', desktop: 'ISAW - Desktop', mobile: 'ISAW - Mobile', pdf: 'ISAW - PDF' },
-    { name: 'Law', desktop: 'Law - Desktop', mobile: 'Law - Mobile', pdf: 'Law - PDF' },
-    { name: 'Guides', desktop: 'Library - Guides - Desktop', mobile: 'Library - Guides - Mobile', pdf: 'Library - Guides - PDF' },
-    { name: 'Main Library', desktop: 'Library - Main - Desktop', mobile: 'Library - Main - Mobile', pdf: 'Library - Main - PDF' },
-    { name: 'Neuroscience', desktop: 'Neuroscience - Desktop', mobile: 'Neuroscience - Mobile', pdf: 'Neuroscience - PDF' },
-    { name: 'Nursing', desktop: 'Nursing - Desktop', mobile: 'Nursing - Mobile', pdf: 'Nursing - PDF' },
-    { name: 'NYU - Main', desktop: 'NYU - Main - Desktop', mobile: 'NYU - Main - Mobile', pdf: 'Main - PDF' },
-    { name: 'Public Health', desktop: 'Public Health - Desktop', mobile: 'Public Health - Mobile', pdf: 'Public Health - PDF' },
-    { name: 'Shanghai', desktop: 'Shanghai - Desktop', mobile: 'Shanghai - Mobile', pdf: 'Shanghai - PDF' },
-    { name: 'Social Work', desktop: 'Social Work - Desktop', mobile: 'Social Work - Mobile', pdf: 'Social Work - PDF' },
-    { name: 'SPS', desktop: 'SPS - Desktop', mobile: 'SPS - Mobile', pdf: 'SPS - PDF' },
-    { name: 'Steinhardt', desktop: 'Steinhardt - Desktop', mobile: 'Steinhardt - Mobile', pdf: 'Steinhardt - PDF' },
-    { name: 'Stern', desktop: 'Stern - Desktop', mobile: 'Stern - Mobile', pdf: 'Stern - PDF' },
-    { name: 'Tandon', desktop: 'Tandon - Desktop', mobile: 'Tandon - Mobile', pdf: 'Tandon - PDF' },
-    { name: 'Tisch', desktop: 'Tisch - Desktop', mobile: 'Tisch - Mobile', pdf: 'Tisch - PDF' },
-    { name: 'Wagner', desktop: 'Wagner - Desktop', mobile: 'Wagner - Mobile', pdf: 'Wagner - PDF' },
-    { name: 'Journalism', desktop: 'Journalism - Desktop', mobile: 'Journalism - Mobile', pdf: 'Journalism - PDF' },
-    { name: 'ITP - Combined Sites', desktop: 'Tisch - ITP - Main - Desktop', mobile: 'Tisch - ITP - Main - Mobile', pdf: 'Tisch - ITP - PDF' }
+    { name: 'Abu Dhabi', desktop: 'Abu Dhabi - Desktop (23)', mobile: 'Abu Dhabi - Mobile (43)', pdf: 'Abu Dhabi - PDF (66)' },
+    { name: 'CAS', desktop: 'A&S - CAS - Desktop (3)', mobile: 'A&S - CAS - Mobile (110)', pdf: 'A&S - CAS - PDF (68)' },
+    { name: 'GSAS', desktop: 'A&S - GSAS - Desktop (4)', mobile: 'A&S - GSAS - Mobile (111)', pdf: 'A&S - GSAS - PDF (69)' },
+    { name: 'Liberal Studies', desktop: 'A&S - Liberal Studies - Desktop (17)', mobile: 'A&S - Liberal Studies - Mobile (112)', pdf: 'A&S - Liberal Studies  - PDF (70)' },
+    { name: 'A&S Main', desktop: 'A&S - Main - Desktop (2)', mobile: 'A&S - Main - Mobile (44)', pdf: 'A&S - Main - PDF (67)' },
+    { name: 'CDS', desktop: 'CDS - Desktop (7)', mobile: 'CDS - Mobile (45)', pdf: 'CDS - PDF (90)' },
+    { name: 'CAOS', desktop: 'Courant - CAOS - Desktop (6)', mobile: 'Courant - CAOS - Mobile (46)', pdf: 'Courant - CAOS - PDF (91)' },
+    { name: 'CIMS', desktop: 'Courant - CIMS - Desktop (8)', mobile: 'Courant - CIMS - Mobile (113)', pdf: 'Courant - CIMS - PDF (92)' },
+    { name: 'CS', desktop: 'Courant - CS - Desktop (107)', mobile: 'Courant - CS - Mobile (114)', pdf: 'Courant - CS - PDF (174)' },
+    { name: 'Math', desktop: 'Courant - Math - Desktop (19)', mobile: 'Courant - Math - Mobile (115)', pdf: 'Courant - Math - PDF (167)' },
+    { name: 'Dental', desktop: 'Dental - Desktop (10)', mobile: 'Dental - Mobile (117)', pdf: 'Dental - PDF (168)' },
+    { name: 'Gallatin', desktop: 'Gallatin - Desktop (12)', mobile: 'Gallatin - Mobile (55)', pdf: 'Gallatin - PDF (170)' },
+    { name: 'IFA', desktop: 'IFA - Desktop (15)', mobile: 'IFA - Mobile (48)', pdf: 'IFA - PDF (171)' },
+    { name: 'ISAW', desktop: 'ISAW - Desktop (16)', mobile: 'ISAW - Mobile (47)', pdf: 'ISAW - PDF (172)' },
+    { name: 'Law', desktop: 'Law - Desktop (30)', mobile: 'Law - Mobile (118)', pdf: 'Law - PDF (100)' },
+    { name: 'Guides', desktop: 'Library - Guides - Desktop (13)', mobile: 'Library - Guides -  Mobile (119)', pdf: 'Library - Guides - PDF (173)' },
+    { name: 'Main Library', desktop: 'Library - Main - Desktop (18)', mobile: 'Library - Main - Mobile (120)', pdf: 'Library - Main - PDF (102)' },
+    { name: 'Neuroscience', desktop: 'Neuroscience - Desktop (20)', mobile: 'Neuroscience - Mobile (121)', pdf: 'Neuroscience - PDF (103)' },
+    { name: 'Nursing', desktop: 'Nursing - Desktop (21)', mobile: 'Nursing - Mobile (56)', pdf: 'Nursing - PDF (104)' },
+    { name: 'NYU - Main', desktop: 'NYU - Main - Desktop (22)', mobile: 'NYU - Main - Mobile (42)', pdf: 'NYU - Main - PDF (65)' },
+    { name: 'Public Health', desktop: 'Public Health - Desktop (24)', mobile: 'Public Health - Mobile (122)', pdf: 'Public Health - PDF (166)' },
+    { name: 'Shanghai', desktop: 'Shanghai - Desktop (25)', mobile: 'Shanghai - Mobile (49)', pdf: 'Shanghai - PDF (80)' },
+    { name: 'Social Work', desktop: 'Social Work - Desktop (26)', mobile: 'Social Work - Mobile (54)', pdf: 'Social Work - PDF (79)' },
+    { name: 'SPS', desktop: 'SPS - Desktop (31)', mobile: 'SPS - Mobile (123)', pdf: 'SPS - PDF (78)' },
+    { name: 'Steinhardt', desktop: 'Steinhardt - Desktop (5)', mobile: 'Steinhardt - Mobile (128)', pdf: 'Steinhardt - PDF (73)' },
+    { name: 'Stern', desktop: 'Stern - Desktop (27)', mobile: 'Stern - Mobile (124)', pdf: 'Stern - PDF (162)' },
+    { name: 'Tandon', desktop: 'Tandon - Desktop (11)', mobile: 'Tandon - Mobile (125)', pdf: 'Tandon - PDF (163)' },
+    { name: 'Tisch', desktop: 'Tisch - Desktop (28)', mobile: 'Tisch - Mobile (53)', pdf: 'Tisch - PDF (164)' },
+    { name: 'Wagner', desktop: 'Wagner - Desktop (29)', mobile: 'Wagner - Mobile (50)', pdf: 'Wagner - PDF (165)' },
+    { name: 'Journalism', desktop: 'Journalism - Desktop (72)', mobile: 'Journalism - Mobile (126)', pdf: 'Journalism - PDF (89)' },
+    { name: 'ITP - Combined Sites', desktop: 'Tisch - ITP - Main - Desktop (137)', mobile: 'Tisch - ITP - Main - Mobile (140)', pdf: 'Tisch - ITP - Main - PDF (139)' }
   ];
   let wasConfig = defaultWasReports.map(entry => ({
     name: entry.name,
     desktop: entry.desktop,
+    desktopId: null,
     mobile: entry.mobile,
+    mobileId: null,
     pdf: entry.pdf,
+    pdfId: null,
     enabled: true
   }));
   let wasDataCache = { status: 'idle', data: null, timestamp: null };
@@ -1408,10 +1488,6 @@
       background: #e9e9e9;
     }
 
-    .a11y-was-config-dialog {
-      width: 1100px;
-      max-width: 98%;
-    }
     .a11y-was-config-dialog .a11y-scan-report-table th[scope='row'] {
       min-width: 280px;
     }
@@ -1679,6 +1755,164 @@
     .a11y-filter-dialog * {
       box-sizing: border-box;
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .a11y-filter-dialog.a11y-was-config-dialog {
+      width: min(96vw, 1280px);
+      max-width: 1280px;
+      max-height: 88vh;
+      padding: 18px 24px 14px;
+    }
+
+    .a11y-ranking-dialog {
+      width: 640px;
+      max-width: min(720px, 95vw);
+      max-height: 80vh;
+    }
+
+    .a11y-ranking-content {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .a11y-ranking-chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .a11y-ranking-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 999px;
+      background: #f1f5f9;
+      color: #0f172a;
+      border: 1px solid rgba(15, 23, 42, 0.1);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .a11y-ranking-chip--alert {
+      background: #fef2f2;
+      border-color: #f87171;
+      color: #b91c1c;
+    }
+
+    .a11y-ranking-chip-label {
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      font-size: 11px;
+    }
+
+    .a11y-ranking-chip-value {
+      font-size: 13px;
+    }
+
+    .a11y-ranking-rows {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .a11y-ranking-row {
+      border: 1px solid #dbe4f0;
+      border-radius: 8px;
+      padding: 10px;
+      background: #fff;
+    }
+
+    .a11y-ranking-row--error {
+      border-color: #f87171;
+      box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.4);
+    }
+
+    .a11y-ranking-row-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+      gap: 8px;
+    }
+
+    .a11y-ranking-row-label {
+      font-weight: 600;
+      color: #0f172a;
+    }
+
+    .a11y-ranking-row-remove {
+      border: none;
+      background: transparent;
+      color: #b91c1c;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .a11y-ranking-row-remove:disabled {
+      color: #94a3b8;
+      cursor: not-allowed;
+    }
+
+    .a11y-ranking-row-select {
+      width: 100%;
+      padding: 6px 8px;
+      border-radius: 6px;
+      border: 1px solid #cbd5f5;
+      font-size: 13px;
+      background: #fff;
+    }
+
+    .a11y-ranking-row-select:focus {
+      outline: 2px solid var(--accent-primary);
+      outline-offset: 2px;
+    }
+
+    .a11y-ranking-row-hint {
+      font-size: 12px;
+      color: #475569;
+      margin-top: 4px;
+    }
+
+    .a11y-ranking-row-error {
+      font-size: 12px;
+      color: #b91c1c;
+      margin-top: 4px;
+      min-height: 16px;
+    }
+
+    .a11y-ranking-inline-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .a11y-ranking-error-summary {
+      font-size: 13px;
+      color: #b91c1c;
+    }
+
+    .a11y-panel-controls > .a11y-ranking-control {
+      margin-right: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      align-items: flex-start;
+    }
+
+    .a11y-ranking-trigger {
+      font-size: 12px;
+    }
+
+    .a11y-ranking-summary {
+      font-size: 12px;
+      color: #475569;
+    }
+
+    .a11y-ranking-summary--warning {
+      color: #b45309;
+      font-weight: 600;
     }
 
     .a11y-scans-dialog {
@@ -2030,6 +2264,101 @@
     }, null);
   }
 
+  function normalizeKeyFragment(value) {
+    return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  }
+
+  function getNumericCountValue(value) {
+    const num = coerceNumber(value, Number.NaN);
+    if (Number.isNaN(num)) return null;
+    if (num < 0) return 0;
+    return num;
+  }
+
+  function matchPageCountEntry(entry, severityKey) {
+    if (!entry || typeof entry !== 'object') return null;
+    const labelSource =
+      entry.impact ??
+      entry.severity ??
+      entry.level ??
+      entry.type ??
+      entry.label ??
+      entry.name ??
+      entry.title ??
+      null;
+    if (!labelSource) return null;
+    const normalizedLabel = normalizeKeyFragment(labelSource);
+    if (!normalizedLabel.includes(severityKey)) return null;
+    const value =
+      entry.count ??
+      entry.value ??
+      entry.total ??
+      entry.pages ??
+      entry.number ??
+      entry.quantity ??
+      entry.pageCount ??
+      null;
+    return getNumericCountValue(value);
+  }
+
+  function findPageImpactCountInNode(node, severityKey, visited) {
+    if (!node || typeof node !== 'object') return null;
+    if (!visited) visited = new WeakSet();
+    if (visited.has(node)) return null;
+    visited.add(node);
+
+    if (!Array.isArray(node)) {
+      const directValue = getNumericCountValue(node[severityKey]);
+      if (directValue != null) return directValue;
+    }
+
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const labeled = matchPageCountEntry(item, severityKey);
+        if (labeled != null) return labeled;
+        const nested = findPageImpactCountInNode(item, severityKey, visited);
+        if (nested != null) return nested;
+      }
+      return null;
+    }
+
+    for (const [key, value] of Object.entries(node)) {
+      const normalizedKey = normalizeKeyFragment(key);
+      const numeric = getNumericCountValue(value);
+      if (numeric != null) {
+        if (
+          normalizedKey === severityKey ||
+          (normalizedKey.includes(severityKey) &&
+            (normalizedKey.includes('page') ||
+             normalizedKey.includes('issue') ||
+             normalizedKey.includes('count') ||
+             normalizedKey.includes('impact')))
+        ) {
+          return numeric;
+        }
+      }
+    }
+
+    for (const value of Object.values(node)) {
+      if (!value || typeof value !== 'object') continue;
+      const labeled = matchPageCountEntry(value, severityKey);
+      if (labeled != null) return labeled;
+      const nested = findPageImpactCountInNode(value, severityKey, visited);
+      if (nested != null) return nested;
+    }
+
+    return null;
+  }
+
+  function extractPageImpactCountFromMetrics(pages, severity) {
+    if (!severity) return null;
+    if (!pages || typeof pages !== 'object') return null;
+    const severityKey = normalizeKeyFragment(severity);
+    if (!severityKey) return null;
+    const count = findPageImpactCountInNode(pages, severityKey, new WeakSet());
+    return Number.isFinite(count) ? count : null;
+  }
+
   async function fetchRunMetricsForRow(row, { signal } = {}) {
     if (!row) throw new Error('Scan not found.');
     const scanId = extractScanIdFromUrl(row.url || row.scanUrl || '');
@@ -2049,10 +2378,10 @@
       moderate: coerceNumber(issues.moderate ?? issues['impactModerate'] ?? issues['impact1'], 0),
       minor: coerceNumber(issues.minor ?? issues['impactMinor'] ?? issues['impact0'], 0),
       needsReview: coerceNumber(issues.needsReview ?? issues['needs_review'] ?? issues['needs-review'], 0),
-      pagesCritical: coerceNumber(pages.critical ?? pages['criticalIssues'] ?? pages['critical'], 0),
-      pagesSerious: coerceNumber(pages.serious ?? pages['seriousIssues'] ?? pages['serious'], 0),
-      pagesModerate: coerceNumber(pages.moderate ?? pages['moderateIssues'] ?? pages['moderate'], 0),
-      pagesMinor: coerceNumber(pages.minor ?? pages['minorIssues'] ?? pages['minor'], 0),
+  pagesCritical: extractPageImpactCountFromMetrics(pages, 'critical'),
+  pagesSerious: extractPageImpactCountFromMetrics(pages, 'serious'),
+  pagesModerate: extractPageImpactCountFromMetrics(pages, 'moderate'),
+  pagesMinor: extractPageImpactCountFromMetrics(pages, 'minor'),
       run: latest,
       runNumber: coerceNumber(latest.runNumber ?? latest.run ?? latest.id, null),
       status: typeof latest.status === 'string' ? latest.status : ''
@@ -2285,7 +2614,7 @@
     return c.critical + c.serious + c.moderate + c.minor;
   }
 
-  function getPageImpactCounts(row) {
+  function getWebsitePageImpactCounts(row) {
     const getValue = value => Math.max(0, coerceNumber(value, 0));
     const pick = (target, keys) => {
       for (const key of keys) {
@@ -2293,23 +2622,35 @@
       }
       return 0;
     };
-    if (getPageImpactSource() === 'api') {
-      const record = getPageImpactApiRecord(row);
-      if (record && record.pages) {
-        return {
-          critical: getValue(record.pages.critical),
-          serious: getValue(record.pages.serious),
-          moderate: getValue(record.pages.moderate),
-          minor: getValue(record.pages.minor)
-        };
-      }
-    }
     return {
       critical: getValue(pick(row, ['pageCritical','criticalPages','crit','criticalIssues','critical'])),
       serious: getValue(pick(row, ['pageSerious','seriousPages','seriousIssues','serious'])),
       moderate: getValue(pick(row, ['pageModerate','moderatePages','moderateIssues','moderate'])),
       minor: getValue(pick(row, ['pageMinor','minorPages','minorIssues','minor']))
     };
+  }
+
+  function normalizePageImpactValue(value) {
+    if (value == null) return null;
+    const numeric = coerceNumber(value, Number.NaN);
+    if (Number.isNaN(numeric)) return null;
+    return Math.max(0, numeric);
+  }
+
+  function getPageImpactCounts(row) {
+    const websiteCounts = getWebsitePageImpactCounts(row);
+    if (getPageImpactSourceForView() === 'api') {
+      const record = getPageImpactApiRecord(row);
+      if (record && record.pages) {
+        return {
+          critical: normalizePageImpactValue(record.pages.critical) ?? websiteCounts.critical,
+          serious: normalizePageImpactValue(record.pages.serious) ?? websiteCounts.serious,
+          moderate: normalizePageImpactValue(record.pages.moderate) ?? websiteCounts.moderate,
+          minor: normalizePageImpactValue(record.pages.minor) ?? websiteCounts.minor
+        };
+      }
+    }
+    return websiteCounts;
   }
 
   function getFilteredPageImpactCounts(row) {
@@ -2326,6 +2667,275 @@
   function getPageTotal(row) {
     const counts = getFilteredPageImpactCounts(row);
     return counts.critical + counts.serious + counts.moderate + counts.minor;
+  }
+
+  function getRankingFieldOption(value) {
+    return rankingFieldLookup.get(value) || null;
+  }
+
+  function getDefaultRankingCriteria() {
+    return rankingFieldOptions
+      .filter(option => option.default !== false)
+      .map(option => option.value);
+  }
+
+  function sanitizeRankingCriteria(values) {
+    const seen = new Set();
+    const order = [];
+    if (Array.isArray(values)) {
+      values.forEach(value => {
+        if (!rankingFieldLookup.has(value) || seen.has(value)) return;
+        order.push(value);
+        seen.add(value);
+      });
+    }
+    if (!order.length) {
+      getDefaultRankingCriteria().forEach(value => {
+        if (seen.has(value)) return;
+        order.push(value);
+        seen.add(value);
+      });
+    }
+    return order;
+  }
+
+  function loadRankingCriteriaFromStorage() {
+    if (typeof localStorage === 'undefined') {
+      return getDefaultRankingCriteria();
+    }
+    try {
+      const raw = localStorage.getItem(rankingCriteriaStorageKey);
+      if (!raw) return getDefaultRankingCriteria();
+      const parsed = JSON.parse(raw);
+      return sanitizeRankingCriteria(parsed);
+    } catch (err) {
+      console.warn('Unable to parse ranking criteria from storage', err);
+      return getDefaultRankingCriteria();
+    }
+  }
+
+  function getRankingCriteria({ includeFallback = false } = {}) {
+    if (!Array.isArray(rankingState.criteria)) {
+      rankingState.criteria = loadRankingCriteriaFromStorage();
+    }
+    const criteria = rankingState.criteria.slice();
+    if (!criteria.length) {
+      criteria.push(...getDefaultRankingCriteria());
+    }
+    if (includeFallback) {
+      const seen = new Set(criteria);
+      rankingFallbackFields.forEach(value => {
+        if (!rankingFieldLookup.has(value) || seen.has(value)) return;
+        criteria.push(value);
+        seen.add(value);
+      });
+    }
+    return criteria;
+  }
+
+  function setRankingCriteria(values) {
+    const sanitized = sanitizeRankingCriteria(values);
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(rankingCriteriaStorageKey, JSON.stringify(sanitized));
+      } catch (err) {
+        console.warn('Unable to persist ranking criteria', err);
+      }
+    }
+    rankingState.criteria = sanitized;
+    updateRankingSummaryUi();
+    return sanitized;
+  }
+
+  function resetRankingCriteria() {
+    return setRankingCriteria(getDefaultRankingCriteria());
+  }
+
+  function getRankingCriteriaCount() {
+    return getRankingCriteria().length;
+  }
+
+  function rankingCriteriaUsesMonitorApi(criteria = getRankingCriteria()) {
+    return criteria.some(value => Boolean(getRankingFieldOption(value)?.requiresApi));
+  }
+
+  function isMonitorApiReadyForRanking() {
+    if (getPageImpactSource() !== 'api') return false;
+    if (pageImpactApiState.status !== 'ready') return false;
+    return pageImpactApiState.data.size > 0;
+  }
+
+  function isRankingFieldAvailable(value) {
+    const option = getRankingFieldOption(value);
+    if (!option) return false;
+    if (!option.requiresApi) return true;
+    return isMonitorApiReadyForRanking();
+  }
+
+  function getRankingScoreValue(row) {
+    if (Number.isFinite(row?.scoreVal)) return row.scoreVal;
+    if (Number.isFinite(row?.avgScore)) return row.avgScore;
+    if (Number.isFinite(row?.score)) return row.score;
+    return null;
+  }
+
+  function getRankingTotalCs(row) {
+    return getRowCritical(row) + getRowSerious(row);
+  }
+
+  function getRankingTotalIssues(row) {
+    if (Number.isFinite(row?.totalIssues)) return row.totalIssues;
+    if (Number.isFinite(row?.total)) return row.total;
+    return getRowTotalIssues(row);
+  }
+
+  function getRankingImpactCount(row, key) {
+    if (Number.isFinite(row?.[key])) return row[key];
+    if (!hasIssueImpactValue(row, key)) return null;
+    const counts = getIssueImpactCounts(row);
+    return Math.max(0, coerceNumber(counts[key], 0));
+  }
+
+  function getRankingNameValue(row) {
+    return (row?.name || row?.label || row?.scan || '').trim();
+  }
+
+  function compareNumericDesc(aVal, bVal, missing = -Infinity) {
+    const aNum = Number.isFinite(aVal) ? aVal : missing;
+    const bNum = Number.isFinite(bVal) ? bVal : missing;
+    if (bNum === aNum) return 0;
+    return bNum - aNum;
+  }
+
+  function compareNumericAsc(aVal, bVal, missing = Infinity) {
+    const aNum = Number.isFinite(aVal) ? aVal : missing;
+    const bNum = Number.isFinite(bVal) ? bVal : missing;
+    if (aNum === bNum) return 0;
+    return aNum - bNum;
+  }
+
+  function compareRankingField(a, b, key) {
+    switch (key) {
+      case 'score':
+        return compareNumericDesc(getRankingScoreValue(a), getRankingScoreValue(b));
+      case 'totalCs':
+        return compareNumericAsc(getRankingTotalCs(a), getRankingTotalCs(b));
+      case 'critical':
+        return compareNumericAsc(getRowCritical(a), getRowCritical(b));
+      case 'serious':
+        return compareNumericAsc(getRowSerious(a), getRowSerious(b));
+      case 'moderate':
+        return compareNumericAsc(getRankingImpactCount(a, 'moderate'), getRankingImpactCount(b, 'moderate'));
+      case 'minor':
+        return compareNumericAsc(getRankingImpactCount(a, 'minor'), getRankingImpactCount(b, 'minor'));
+      case 'totalIssues':
+        return compareNumericAsc(getRankingTotalIssues(a), getRankingTotalIssues(b));
+      case 'name':
+        return getRankingNameValue(a).localeCompare(getRankingNameValue(b), undefined, { sensitivity: 'base' });
+      default:
+        return 0;
+    }
+  }
+
+  function compareByRankingCriteria(a, b, criteria = null) {
+    const list = (criteria && criteria.length ? criteria : getRankingCriteria({ includeFallback: true }));
+    for (let i = 0; i < list.length; i += 1) {
+      const key = list[i];
+      const result = compareRankingField(a, b, key);
+      if (result !== 0) return result;
+    }
+    const nameResult = compareRankingField(a, b, 'name');
+    if (nameResult !== 0) return nameResult;
+    const labelA = (a?.label || '').toString();
+    const labelB = (b?.label || '').toString();
+    return labelA.localeCompare(labelB, undefined, { sensitivity: 'base' });
+  }
+
+  function getRankingSignatureValue(row, field) {
+    switch (field) {
+      case 'score': {
+        const scoreValue = getRankingScoreValue(row);
+        return Number.isFinite(scoreValue) ? scoreValue.toFixed(3) : 'na';
+      }
+      case 'totalCs': {
+        const totalCsValue = getRankingTotalCs(row);
+        return Number.isFinite(totalCsValue) ? String(totalCsValue) : 'na';
+      }
+      case 'critical': {
+        const critValue = getRowCritical(row);
+        return Number.isFinite(critValue) ? String(critValue) : 'na';
+      }
+      case 'serious': {
+        const seriousValue = getRowSerious(row);
+        return Number.isFinite(seriousValue) ? String(seriousValue) : 'na';
+      }
+      case 'moderate': {
+        const moderateValue = getRankingImpactCount(row, 'moderate');
+        return Number.isFinite(moderateValue) ? String(moderateValue) : 'na';
+      }
+      case 'minor': {
+        const minorValue = getRankingImpactCount(row, 'minor');
+        return Number.isFinite(minorValue) ? String(minorValue) : 'na';
+      }
+      case 'totalIssues': {
+        const totalIssuesValue = getRankingTotalIssues(row);
+        return Number.isFinite(totalIssuesValue) ? String(totalIssuesValue) : 'na';
+      }
+      case 'name':
+        return getRankingNameValue(row).toLowerCase();
+      default:
+        return '';
+    }
+  }
+
+  function buildRankingSignature(row, criteria = getRankingCriteria({ includeFallback: true })) {
+    return criteria.map(field => getRankingSignatureValue(row, field)).join('|');
+  }
+
+  function buildRankingControlBlock() {
+    if (pageContext !== 'scans') return null;
+    const wrapper = document.createElement('div');
+    wrapper.className = 'a11y-ranking-control';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'a11y-btn-secondary a11y-ranking-trigger';
+    button.id = rankingState.buttonId;
+    button.setAttribute('aria-haspopup','dialog');
+    button.addEventListener('click', () => openRankingDialog(button));
+    const summary = document.createElement('span');
+    summary.id = rankingState.summaryId;
+    summary.className = 'a11y-ranking-summary';
+    summary.setAttribute('aria-live','polite');
+    wrapper.appendChild(button);
+    wrapper.appendChild(summary);
+    rankingState.triggerButton = button;
+    rankingState.summaryEl = summary;
+    updateRankingSummaryUi();
+    return wrapper;
+  }
+
+  function updateRankingSummaryUi() {
+    const criteria = getRankingCriteria();
+    const button = rankingState.triggerButton;
+    if (button) {
+      button.textContent = `Ranking: ${criteria.length} applied`;
+      button.setAttribute('aria-describedby', rankingState.summaryId);
+    }
+    const summary = rankingState.summaryEl;
+    if (summary) {
+      const labels = criteria.map(value => {
+        const option = getRankingFieldOption(value);
+        return option?.shortLabel || option?.label || value;
+      });
+      const needsApi = rankingCriteriaUsesMonitorApi(criteria);
+      const showWarning = needsApi && !isMonitorApiReadyForRanking();
+      let text = labels.length ? labels.join(' → ') : 'Using default ranking order.';
+      if (showWarning) {
+        text += ' • Monitor API data required';
+      }
+      summary.textContent = text;
+      summary.classList.toggle('a11y-ranking-summary--warning', showWarning);
+    }
   }
 
   function aggregateDomains(rows) {
@@ -2374,7 +2984,7 @@
   }
 
   function getPageImpactFilterSummaryText() {
-    const sourceLabel = getPageImpactSourceLabel();
+    const sourceLabel = getPageImpactSourceLabel(getPageImpactSourceForView());
     return `Impact filter (${sourceLabel}): ${formatPageImpactSelection(getActivePageImpactKeys())}`;
   }
 
@@ -2386,7 +2996,7 @@
   function updatePageImpactFilterButton(button = pageImpactFilterState.button) {
     if (!button) return;
     const selectionText = formatPageImpactSelection(getActivePageImpactKeys());
-    const sourceLabel = getPageImpactSourceLabel();
+    const sourceLabel = getPageImpactSourceLabel(getPageImpactSourceForView());
     const aria = `Edit filter Impact. ${sourceLabel} with ${selectionText} is current value.`;
     button.setAttribute('aria-label', aria);
     button.setAttribute('aria-expanded', pageImpactFilterState.popover ? 'true' : 'false');
@@ -2410,6 +3020,7 @@
     if (pageImpactFilterState.sourceSegment) {
       pageImpactFilterState.sourceSegment.setAttribute('data-active-source', source);
     }
+    updateRankingSummaryUi();
   }
 
   function updatePageImpactApiControls() {
@@ -2545,6 +3156,7 @@
       button.dataset.apiFetchMode = fetchMode;
     }
     setFooterRefreshMessage(footerMessage);
+    updateRankingSummaryUi();
   }
 
   async function handleMonitorApiChipClick(target = pageImpactFilterState.apiChip) {
@@ -2627,7 +3239,9 @@
     if (!button) return;
     closePageImpactFilterPopover({ focusButton: false });
     const workingSelection = new Set(getActivePageImpactKeys());
-    let workingSource = getPageImpactSource();
+    const workingSource = getPageImpactSource();
+    const storedSelectionSnapshot = new Set(pageImpactFilterState.selection || []);
+    const viewLimitedToPages = isPagesTabActive();
     pageImpactFilterState.workingSelection = workingSelection;
     pageImpactFilterState.workingSource = workingSource;
     const popover = document.createElement('div');
@@ -2646,10 +3260,11 @@
 
     const panel = document.createElement('div');
     panel.className = 'Panel f318df3e62a6';
-    const title = document.createElement('span');
+  const title = document.createElement('span');
     title.className = 'Offscreen';
     title.id = pageImpactFilterState.titleId;
-    const screenReaderSourceLabel = getPageImpactSourceLabel(workingSource);
+  const popoverSourceKey = viewLimitedToPages ? getPageImpactSourceForView() : workingSource;
+  const screenReaderSourceLabel = getPageImpactSourceLabel(popoverSourceKey);
     title.textContent = `Edit filter Impact. ${screenReaderSourceLabel} with ${formatPageImpactSelection(getActivePageImpactKeys())} is current value.`;
     panel.appendChild(title);
 
@@ -2658,7 +3273,7 @@
   const checkboxMap = new Map();
 
     const syncWorkingSelectionToSource = source => {
-      const allowed = getAllowedImpactKeysForSource(source);
+      const allowed = getAllowedImpactKeysForSource(source, viewLimitedToPages ? { scopedToView: true } : undefined);
       let changed = false;
       Array.from(workingSelection).forEach(key => {
         if (!allowed.has(key)) {
@@ -2667,7 +3282,10 @@
         }
       });
       if (!workingSelection.size) {
-        getDefaultImpactsForSource(source).forEach(key => workingSelection.add(key));
+        const defaults = viewLimitedToPages
+          ? getDefaultImpactsForView(source)
+          : getDefaultImpactsForSource(source);
+        defaults.forEach(key => workingSelection.add(key));
         changed = true;
       }
       return changed;
@@ -2695,7 +3313,7 @@
     group.setAttribute('role','group');
     group.setAttribute('aria-labelledby', legend.id);
     const handleToggle = (key, checked) => {
-      const allowed = getAllowedImpactKeysForSource(workingSource);
+      const allowed = getAllowedImpactKeysForSource(workingSource, viewLimitedToPages ? { scopedToView: true } : undefined);
       if (!allowed.has(key)) return;
       if (checked) {
         workingSelection.add(key);
@@ -2768,21 +3386,32 @@
         });
         if (!ok) return;
       }
-      applyPageImpactFilter(workingSelection, workingSource);
+      const baseSelection = Array.from(workingSelection);
+      if (viewLimitedToPages) {
+        const allowed = getAllowedImpactKeysForSource(workingSource, { scopedToView: true });
+        const preserved = Array.from(storedSelectionSnapshot).filter(key => !allowed.has(key));
+        preserved.forEach(key => {
+          if (!baseSelection.includes(key)) baseSelection.push(key);
+        });
+      }
+      applyPageImpactFilter(baseSelection, workingSource);
       closePageImpactFilterPopover({ focusButton: false });
       handlePageImpactFilterChanged();
     }
 
     function handleReset() {
       workingSelection.clear();
-      getDefaultImpactsForSource(workingSource).forEach(key => workingSelection.add(key));
+      const defaults = viewLimitedToPages
+        ? getDefaultImpactsForView(workingSource)
+        : getDefaultImpactsForSource(workingSource);
+      defaults.forEach(key => workingSelection.add(key));
       refreshCheckboxStates();
       updateSourceHintText();
       updateApplyState();
     }
 
     function refreshCheckboxStates() {
-      const allowed = getAllowedImpactKeysForSource(workingSource);
+      const allowed = getAllowedImpactKeysForSource(workingSource, viewLimitedToPages ? { scopedToView: true } : undefined);
       checkboxMap.forEach((input, key) => {
         const isAllowed = allowed.has(key);
         input.disabled = !isAllowed;
@@ -2803,6 +3432,10 @@
     }
 
     function updateSourceHintText() {
+      if (viewLimitedToPages) {
+        sourceHint.textContent = 'Pages with Issues always uses the Latest scan source. Moderate and Minor impacts are unavailable on this tab.';
+        return;
+      }
       if (workingSource === 'api') {
         sourceHint.textContent = 'Moderate and Minor counts are included via the axe Monitor API.';
       } else {
@@ -3216,41 +3849,111 @@
     return Number.isFinite(value) ? `${value.toFixed(1)}%` : fallback;
   }
 
+  function extractScanIdFromLabel(label) {
+    if (label == null) return null;
+    const match = String(label).match(/\((\d+)\)\s*$/);
+    return match ? match[1] : null;
+  }
+
+  function stripTrailingScanId(label) {
+    if (label == null) return '';
+    return String(label).replace(/\s*\(\d+\)\s*$/, '').trim();
+  }
+
+  function formatScanLabelWithId(label, id) {
+    const safeLabel = label == null ? '' : String(label);
+    if (!id) return safeLabel;
+    const suffix = `(${id})`;
+    if (safeLabel.includes(suffix)) return safeLabel;
+    const spacer = safeLabel === '' || safeLabel.endsWith(' ') ? '' : ' ';
+    return `${safeLabel}${spacer}${suffix}`;
+  }
+
   function normalizeScanName(name) {
-    return (name || '').trim().toLowerCase();
+    return stripTrailingScanId(name).toLowerCase();
   }
 
   function buildRowLookup(rows) {
     const map = new Map();
+    const idMap = new Map();
     rows.forEach(row => {
       const key = normalizeScanName(row.name);
       if (key && !map.has(key)) {
         map.set(key, row);
       }
+      const rowId = getRowScanId(row);
+      if (rowId && !idMap.has(rowId)) {
+        idMap.set(rowId, row);
+      }
     });
+    map.idMap = idMap;
     return map;
   }
 
   function getRowByName(rowLookup, name) {
     if (!rowLookup || !name) return null;
+    const id = extractScanIdFromLabel(name);
+    if (id && rowLookup.idMap?.has(id)) {
+      return rowLookup.idMap.get(id) || null;
+    }
     return rowLookup.get(normalizeScanName(name)) || null;
   }
 
+  function normalizeScanOptionKey(name) {
+    return stripTrailingScanId(name)
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
+  }
+
   function getScanOptions(rowLookup) {
-    const options = new Set();
+    const optionMap = new Map();
+    const addOption = (input, idOverride = null) => {
+      if (!input) return;
+      const baseValue = typeof input === 'string'
+        ? input
+        : (input.value ?? input.label ?? '');
+      if (!baseValue) return;
+      const normalized = normalizeScanOptionKey(baseValue);
+      if (!normalized) return;
+      const baseLabel = typeof input === 'string'
+        ? input
+        : (input.label ?? baseValue);
+      const explicitId = idOverride ?? (typeof input === 'object' ? input.id : null);
+      const derivedId = explicitId
+        ?? extractScanIdFromLabel(baseValue)
+        ?? extractScanIdFromLabel(baseLabel);
+      const formattedLabel = formatScanLabelWithId(baseLabel, derivedId);
+      const formattedValue = formatScanLabelWithId(baseValue, derivedId);
+      const existing = optionMap.get(normalized);
+      if (existing) {
+        if (!existing.id && derivedId) {
+          existing.id = derivedId;
+          existing.label = formatScanLabelWithId(existing.label, derivedId);
+          existing.value = formatScanLabelWithId(existing.value, derivedId);
+        }
+        return;
+      }
+      optionMap.set(normalized, {
+        label: formattedLabel,
+        value: formattedValue,
+        id: derivedId || null
+      });
+    };
     if (rowLookup) {
       rowLookup.forEach(row => {
-        if (row?.name) options.add(row.name);
+        addOption(row?.name, getRowScanId(row));
       });
     }
     defaultWasReports.forEach(row => {
-      if (row.desktop) options.add(row.desktop);
-      if (row.mobile) options.add(row.mobile);
-      if (row.pdf) options.add(row.pdf);
+      addOption(row.desktop);
+      addOption(row.mobile);
+      addOption(row.pdf);
     });
-    return Array.from(options).filter(Boolean).sort((a, b) =>
-      a.localeCompare(b, undefined, { sensitivity: 'base' })
-    );
+    return Array.from(optionMap.values()).sort((a, b) => {
+      const aLabel = a.label ?? a.value ?? '';
+      const bLabel = b.label ?? b.value ?? '';
+      return aLabel.localeCompare(bLabel, undefined, { sensitivity: 'base' });
+    });
   }
 
   function ensureWasConfigDefaults() {
@@ -3260,8 +3963,11 @@
         wasConfig.push({
           name: defaultRow.name,
           desktop: defaultRow.desktop,
+          desktopId: null,
           mobile: defaultRow.mobile,
+          mobileId: null,
           pdf: defaultRow.pdf,
+          pdfId: null,
           enabled: true
         });
       }
@@ -3271,8 +3977,11 @@
       return {
         name: row.name,
         desktop: row.desktop || fallback?.desktop || '',
+        desktopId: row.desktopId ?? null,
         mobile: row.mobile || fallback?.mobile || '',
+        mobileId: row.mobileId ?? null,
         pdf: row.pdf || fallback?.pdf || '',
+        pdfId: row.pdfId ?? null,
         enabled: row.enabled !== false
       };
     });
@@ -3747,9 +4456,21 @@
     return cleaned;
   }
 
-  function getAllowedImpactKeysForSource(source) {
+  function getAllowedImpactKeysForSource(source, { scopedToView = false } = {}) {
     const key = source === 'api' ? 'api' : 'website';
-    return pageImpactSourceAllowedKeys[key] || pageImpactSourceAllowedKeys[defaultPageImpactSource];
+    const allowedBase = pageImpactSourceAllowedKeys[key] || pageImpactSourceAllowedKeys[defaultPageImpactSource];
+    const allowed = new Set(allowedBase);
+    if (!scopedToView) return allowed;
+    if (isPagesTabActive()) {
+      const filtered = new Set();
+      pagesTabImpactKeys.forEach(value => {
+        if (allowed.has(value)) {
+          filtered.add(value);
+        }
+      });
+      return filtered.size ? filtered : allowed;
+    }
+    return allowed;
   }
 
   function getDefaultImpactsForSource(source = defaultPageImpactSource) {
@@ -3757,6 +4478,14 @@
     return pageImpactFilterOptions
       .map(option => option.key)
       .filter(key => allowed.has(key));
+  }
+
+  function getDefaultImpactsForView(source = defaultPageImpactSource) {
+    const allowed = getAllowedImpactKeysForSource(source, { scopedToView: true });
+    const defaults = pageImpactFilterOptions
+      .map(option => option.key)
+      .filter(key => allowed.has(key));
+    return defaults.length ? defaults : Array.from(allowed);
   }
 
   function normalizeSelectionForSource(keys, source) {
@@ -3828,6 +4557,9 @@
 
   function setPageImpactSource(source) {
     const normalizedSource = (source === 'api' || source === 'website') ? source : defaultPageImpactSource;
+    if (normalizedSource === 'api' && isPagesTabActive()) {
+      return;
+    }
     const prevSource = getPageImpactSource();
     let nextSelection = Array.from(pageImpactFilterState.selection || []);
     if (normalizedSource === 'api' && prevSource !== 'api') {
@@ -3843,6 +4575,13 @@
     return pageImpactFilterState.source || defaultPageImpactSource;
   }
 
+  function getPageImpactSourceForView() {
+    if (isPagesTabActive()) {
+      return defaultPageImpactSource;
+    }
+    return getPageImpactSource();
+  }
+
   function getPageImpactSourceLabel(source = getPageImpactSource()) {
     const option = pageImpactSourceOptions.find(entry => entry.key === source);
     if (option) return option.label;
@@ -3853,9 +4592,9 @@
   function getActivePageImpactSet() {
     const source = getPageImpactSource();
     if (!pageImpactFilterState.selection || !pageImpactFilterState.selection.size) {
-      pageImpactFilterState.selection = new Set(getDefaultImpactsForSource(source));
-      persistPageImpactFilters(Array.from(pageImpactFilterState.selection), source);
-      return pageImpactFilterState.selection;
+      const defaults = getDefaultImpactsForSource(source);
+      pageImpactFilterState.selection = new Set(defaults);
+      persistPageImpactFilters(defaults, source);
     }
     const currentKeys = Array.from(pageImpactFilterState.selection);
     const normalized = normalizeSelectionForSource(currentKeys, source);
@@ -3864,7 +4603,12 @@
       pageImpactFilterState.selection = new Set(finalKeys);
       persistPageImpactFilters(finalKeys, source);
     }
-    return pageImpactFilterState.selection;
+    const viewAllowed = getAllowedImpactKeysForSource(source, { scopedToView: true });
+    let finalViewKeys = normalized.filter(key => viewAllowed.has(key));
+    if (!finalViewKeys.length) {
+      finalViewKeys = getDefaultImpactsForView(source);
+    }
+    return new Set(finalViewKeys);
   }
 
   function getRowScanId(row) {
@@ -6841,6 +7585,26 @@
       .slice(0, 60) || 'table';
   }
 
+  function getCellCsvText(cell) {
+    if (!cell) return '';
+    const select = cell.querySelector('select');
+    if (select) {
+      const option = select.options[select.selectedIndex];
+      const value = option?.textContent ?? select.value;
+      return value ? value.trim() : '';
+    }
+    if (cell.dataset?.csvValue != null) {
+      return cell.dataset.csvValue;
+    }
+    const checkbox = cell.querySelector('input[type="checkbox"]');
+    if (checkbox) {
+      const checkedLabel = cell.dataset?.csvChecked ?? 'Yes';
+      const uncheckedLabel = cell.dataset?.csvUnchecked ?? 'No';
+      return checkbox.checked ? checkedLabel : uncheckedLabel;
+    }
+    return (cell.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
   function tableToCsv(table) {
     const rows = Array.from(table.querySelectorAll('tr'));
     return rows
@@ -6848,7 +7612,7 @@
         const cells = Array.from(row.querySelectorAll('th,td'));
         return cells
           .map(cell => {
-            const text = (cell.textContent || '').replace(/\s+/g, ' ').trim();
+            const text = getCellCsvText(cell);
             const escaped = text.replace(/"/g, '""');
             return /[",\n]/.test(text) ? `"${escaped}"` : escaped;
           })
@@ -7332,21 +8096,46 @@
     blank.value = '';
     blank.textContent = '(none)';
     select.appendChild(blank);
+
     const normalizedSet = new Set();
-    options.forEach(name => {
+    const findScanIdForName = name => {
+      if (!name) return null;
+      const explicit = extractScanIdFromLabel(name);
+      if (explicit) return explicit;
+      if (!wasRuntimeContext?.rowLookup) return null;
+      const row = getRowByName(wasRuntimeContext.rowLookup, name);
+      if (!row) return null;
+      return getRowScanId(row);
+    };
+    const appendOption = optionData => {
+      if (!optionData) return;
+      const entry = typeof optionData === 'string'
+        ? { value: optionData, label: optionData, id: null }
+        : optionData;
+      const rawValue = entry.value ?? entry.label;
+      if (rawValue == null) return;
+      const value = String(rawValue);
+      const label = entry.label != null ? String(entry.label) : value;
+      const id = entry.id || null;
+      const normalized = normalizeScanOptionKey(value);
+      if (!normalized || normalizedSet.has(normalized)) return;
+      normalizedSet.add(normalized);
       const option = document.createElement('option');
-      option.value = name;
-      option.textContent = name;
+      option.value = value;
+      option.textContent = formatScanLabelWithId(label, id);
       select.appendChild(option);
-      normalizedSet.add(name.toLowerCase());
-    });
-    if (currentValue && !normalizedSet.has(currentValue.toLowerCase())) {
+    };
+    (options || []).forEach(appendOption);
+    const normalizedCurrent = normalizeScanOptionKey(currentValue);
+    if (currentValue && normalizedCurrent && !normalizedSet.has(normalizedCurrent)) {
       const option = document.createElement('option');
       option.value = currentValue;
-      option.textContent = `${currentValue} (current)`;
+      const resolvedId = findScanIdForName(currentValue);
+      const labelWithId = formatScanLabelWithId(currentValue, resolvedId);
+      option.textContent = `${labelWithId} (current)`;
       select.appendChild(option);
     }
-    select.value = currentValue || '';
+    select.value = currentValue != null ? String(currentValue) : '';
     return select;
   }
 
@@ -7398,7 +8187,8 @@
   const activeImpactKeys = getActivePageImpactKeys();
   const activeImpactSet = new Set(activeImpactKeys);
   const impactFilterLabel = formatPageImpactSelection(activeImpactKeys);
-  const sourceLabel = getPageImpactSourceLabel();
+  const activeViewSource = getPageImpactSourceForView();
+  const sourceLabel = getPageImpactSourceLabel(activeViewSource);
   const impactHeadingSuffixParts = [];
   if (impactFilterLabel) impactHeadingSuffixParts.push(`Impact: ${impactFilterLabel}`);
   if (sourceLabel) impactHeadingSuffixParts.push(`Source: ${sourceLabel}`);
@@ -7431,7 +8221,7 @@
     };
 
     const createSourceChip = () => {
-      const sourceKey = getPageImpactSource();
+      const sourceKey = getPageImpactSourceForView();
       if (sourceKey === 'api' && !isMonitorApiDataReady()) return null;
       const option = pageImpactSourceOptions.find(entry => entry.key === sourceKey);
       if (!option) return null;
@@ -7457,7 +8247,7 @@
     };
 
     const createMonitorApiStatusMetaChip = () => {
-      if (getPageImpactSource() !== 'api') return null;
+      if (getPageImpactSourceForView() !== 'api') return null;
       const coverage = getPageImpactApiCoverage();
       if (!coverage.total || coverage.missing <= 0) return null;
       const chip = document.createElement('span');
@@ -8432,15 +9222,19 @@
         }
       });
       const totalCs = crit + serious;
+      const avgScore = scoreCount ? scoreSum / scoreCount : null;
       return {
         label,
+        name: label,
         crit,
         serious,
         moderate: moderateComplete ? moderate : null,
         minor: minorComplete ? minor : null,
         totalCs,
         totalIssues,
-        avgScore: scoreCount ? scoreSum / scoreCount : null,
+        total: totalIssues,
+        avgScore,
+        scoreVal: avgScore,
         rows: rows.slice()
       };
     }
@@ -8487,26 +9281,12 @@
         details.appendChild(p);
         return details;
       }
-      entries.sort((a, b) => {
-        const scoreA = Number.isFinite(a.avgScore) ? a.avgScore : -Infinity;
-        const scoreB = Number.isFinite(b.avgScore) ? b.avgScore : -Infinity;
-        if (scoreB !== scoreA) return scoreB - scoreA;
-        if (a.totalCs !== b.totalCs) return a.totalCs - b.totalCs;
-        if (a.crit !== b.crit) return a.crit - b.crit;
-        if (a.serious !== b.serious) return a.serious - b.serious;
-        if (a.totalIssues !== b.totalIssues) return a.totalIssues - b.totalIssues;
-        return a.label.localeCompare(b.label, undefined, { sensitivity: 'base' });
-      });
+      const rankingCriteria = getRankingCriteria({ includeFallback: true });
+      entries.sort((a, b) => compareByRankingCriteria(a, b, rankingCriteria));
       let lastRankSignature = null;
       let lastRank = 0;
       entries.forEach((entry, idx) => {
-        const signature = [
-          Number.isFinite(entry.avgScore) ? entry.avgScore.toFixed(3) : 'na',
-          entry.totalCs,
-          entry.crit,
-          entry.serious,
-          entry.totalIssues
-        ].join('|');
+        const signature = buildRankingSignature(entry, rankingCriteria);
         if (signature !== lastRankSignature) {
           lastRank = idx + 1;
           lastRankSignature = signature;
@@ -8582,32 +9362,16 @@
     }
 
     function compareRankingRows(a, b) {
-      const scoreA = Number.isFinite(a.scoreVal) ? a.scoreVal : -Infinity;
-      const scoreB = Number.isFinite(b.scoreVal) ? b.scoreVal : -Infinity;
-      if (scoreB !== scoreA) return scoreB - scoreA;
-      const totalCsA = getRowCritical(a) + getRowSerious(a);
-      const totalCsB = getRowCritical(b) + getRowSerious(b);
-      if (totalCsA !== totalCsB) return totalCsA - totalCsB;
-      if (getRowCritical(a) !== getRowCritical(b)) return getRowCritical(a) - getRowCritical(b);
-      if (getRowSerious(a) !== getRowSerious(b)) return getRowSerious(a) - getRowSerious(b);
-      const totalIssuesA = getRowTotalIssues(a);
-      const totalIssuesB = getRowTotalIssues(b);
-      if (totalIssuesA !== totalIssuesB) return totalIssuesA - totalIssuesB;
-      return (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base' });
+      return compareByRankingCriteria(a, b);
     }
 
     function rankScans(rows) {
-      const sorted = rows.slice().sort(compareRankingRows);
+      const rankingCriteria = getRankingCriteria({ includeFallback: true });
+      const sorted = rows.slice().sort((a, b) => compareByRankingCriteria(a, b, rankingCriteria));
       let lastSignature = null;
       let lastRank = 0;
       return sorted.map((row, idx) => {
-        const signature = [
-          Number.isFinite(row.scoreVal) ? row.scoreVal.toFixed(3) : 'na',
-          getRowCritical(row) + getRowSerious(row),
-          getRowCritical(row),
-          getRowSerious(row),
-          getRowTotalIssues(row)
-        ].join('|');
+        const signature = buildRankingSignature(row, rankingCriteria);
         if (signature !== lastSignature) {
           lastRank = idx + 1;
           lastSignature = signature;
@@ -8796,6 +9560,10 @@
       }
       const controls = document.createElement('div');
       controls.className = 'a11y-panel-controls';
+      if (panel?.dataset?.tabKey === 'ranking' && pageContext === 'scans') {
+        const rankingControl = buildRankingControlBlock();
+        if (rankingControl) controls.appendChild(rankingControl);
+      }
       const expandBtn = document.createElement('button');
       expandBtn.type = 'button';
       expandBtn.className = 'a11y-panel-toggle-btn';
@@ -12135,6 +12903,406 @@
       } catch (err) {
         reject(err);
       }
+    });
+  }
+
+  function openRankingDialog(triggerButton) {
+    if (rankingState.dialog) {
+      rankingState.dialog.focus();
+      return;
+    }
+    const overlay = document.createElement('div');
+    overlay.className = 'a11y-filter-overlay';
+    const dialog = document.createElement('div');
+    dialog.className = 'a11y-filter-dialog a11y-ranking-dialog';
+    dialog.setAttribute('role','dialog');
+    dialog.setAttribute('aria-modal','true');
+    dialog.setAttribute('aria-labelledby', rankingState.dialogTitleId);
+
+    rankingState.dialog = dialog;
+    rankingState.lastTrigger = triggerButton || document.activeElement;
+
+    const header = document.createElement('div');
+    header.className = 'a11y-filter-header';
+    const h2 = document.createElement('h2');
+    h2.id = rankingState.dialogTitleId;
+    h2.textContent = 'Ranking order';
+    h2.setAttribute('tabindex','-1');
+    header.appendChild(h2);
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'a11y-filter-close';
+    closeBtn.setAttribute('aria-label','Close ranking order dialog');
+    closeBtn.innerHTML = '×';
+    header.appendChild(closeBtn);
+    dialog.appendChild(header);
+
+    const content = document.createElement('div');
+    content.className = 'a11y-filter-content a11y-ranking-content';
+    const intro = document.createElement('p');
+    intro.textContent = 'Choose the order of ranking priorities. The first row is applied before the next, so place your most important criteria at the top.';
+    content.appendChild(intro);
+
+    const chipsRow = document.createElement('div');
+    chipsRow.className = 'a11y-ranking-chip-row';
+    const appliedChip = document.createElement('div');
+    appliedChip.className = 'a11y-ranking-chip';
+    const appliedChipLabel = document.createElement('span');
+    appliedChipLabel.className = 'a11y-ranking-chip-label';
+    appliedChipLabel.textContent = 'Priorities';
+    const appliedChipValue = document.createElement('span');
+    appliedChipValue.className = 'a11y-ranking-chip-value';
+    appliedChip.appendChild(appliedChipLabel);
+    appliedChip.appendChild(appliedChipValue);
+    const apiChip = document.createElement('div');
+    apiChip.className = 'a11y-ranking-chip';
+    const apiChipLabel = document.createElement('span');
+    apiChipLabel.className = 'a11y-ranking-chip-label';
+    apiChipLabel.textContent = 'Monitor API';
+    const apiChipValue = document.createElement('span');
+    apiChipValue.className = 'a11y-ranking-chip-value';
+    apiChip.appendChild(apiChipLabel);
+    apiChip.appendChild(apiChipValue);
+    chipsRow.appendChild(appliedChip);
+    chipsRow.appendChild(apiChip);
+    content.appendChild(chipsRow);
+
+    const rowsContainer = document.createElement('div');
+    rowsContainer.className = 'a11y-ranking-rows';
+    content.appendChild(rowsContainer);
+
+    const errorSummary = document.createElement('div');
+    errorSummary.className = 'a11y-ranking-error-summary';
+    errorSummary.setAttribute('aria-live','polite');
+    content.appendChild(errorSummary);
+
+    const actionRow = document.createElement('div');
+    actionRow.className = 'a11y-ranking-inline-actions';
+    const addRowBtn = document.createElement('button');
+    addRowBtn.type = 'button';
+    addRowBtn.className = 'a11y-btn-secondary a11y-ranking-add-btn';
+    addRowBtn.textContent = 'Add priority';
+    const clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.className = 'a11y-btn-tertiary a11y-ranking-clear-btn';
+    clearBtn.textContent = 'Clear all';
+    const resetBtn = document.createElement('button');
+    resetBtn.type = 'button';
+    resetBtn.className = 'a11y-btn-tertiary a11y-ranking-reset-btn';
+    resetBtn.textContent = 'Restore defaults';
+    actionRow.appendChild(addRowBtn);
+    actionRow.appendChild(clearBtn);
+    actionRow.appendChild(resetBtn);
+    content.appendChild(actionRow);
+
+    dialog.appendChild(content);
+
+    const footer = document.createElement('div');
+    footer.className = 'a11y-filter-footer';
+    const applyBtn = document.createElement('button');
+    applyBtn.type = 'button';
+    applyBtn.className = 'a11y-btn-primary';
+    applyBtn.textContent = 'Apply ranking';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'a11y-btn-secondary';
+    cancelBtn.textContent = 'Cancel';
+    footer.appendChild(applyBtn);
+    footer.appendChild(cancelBtn);
+    dialog.appendChild(footer);
+
+    overlay.appendChild(dialog);
+    appendOverlayAfterFooter(overlay);
+
+    const baseValues = getRankingCriteria();
+    setRowsFromValues(baseValues.length ? baseValues : ['']);
+    updateChips();
+
+    function setRowsFromValues(values) {
+      rowsContainer.innerHTML = '';
+      const entries = values && values.length ? values : [''];
+      entries.forEach(value => rowsContainer.appendChild(createRow(value)));
+      syncRowOrder();
+      refreshOptionStates();
+      setErrorSummary('');
+      updateChips();
+    }
+
+    function createRow(initialValue = '') {
+      const rowEl = document.createElement('div');
+      rowEl.className = 'a11y-ranking-row';
+      const headerEl = document.createElement('div');
+      headerEl.className = 'a11y-ranking-row-header';
+      const label = document.createElement('label');
+      label.className = 'a11y-ranking-row-label';
+      const selectId = `a11y-ranking-select-${Math.random().toString(36).slice(2)}`;
+      label.setAttribute('for', selectId);
+      headerEl.appendChild(label);
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'a11y-ranking-row-remove';
+      removeBtn.textContent = 'Remove';
+      removeBtn.addEventListener('click', () => {
+        rowEl.remove();
+        if (!rowsContainer.children.length) {
+          rowsContainer.appendChild(createRow(''));
+        }
+        syncRowOrder();
+        refreshOptionStates();
+        setErrorSummary('');
+        updateChips();
+      });
+      headerEl.appendChild(removeBtn);
+      rowEl.appendChild(headerEl);
+
+      const select = document.createElement('select');
+      select.id = selectId;
+      select.className = 'a11y-ranking-row-select';
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = 'Select a ranking field';
+      select.appendChild(placeholder);
+      rankingFieldOptions.forEach(option => {
+        const opt = document.createElement('option');
+        opt.value = option.value;
+        opt.textContent = option.requiresApi ? `${option.label} (Monitor API)` : option.label;
+        select.appendChild(opt);
+      });
+      if (initialValue && rankingFieldLookup.has(initialValue)) {
+        select.value = initialValue;
+      }
+      select.addEventListener('change', () => {
+        clearRowError(rowEl);
+        updateRowHint(rowEl, select.value);
+        refreshOptionStates();
+        updateChips();
+      });
+      rowEl.appendChild(select);
+
+      const hint = document.createElement('div');
+      hint.className = 'a11y-ranking-row-hint';
+      rowEl.appendChild(hint);
+
+      const error = document.createElement('div');
+      error.className = 'a11y-ranking-row-error';
+      error.id = `${selectId}-error`;
+      error.setAttribute('aria-live','polite');
+      rowEl.appendChild(error);
+
+      updateRowHint(rowEl, select.value);
+      return rowEl;
+    }
+
+    function updateRowHint(rowEl, value) {
+      const hint = rowEl.querySelector('.a11y-ranking-row-hint');
+      const option = getRankingFieldOption(value);
+      if (option?.requiresApi && !isMonitorApiReadyForRanking()) {
+        hint.textContent = 'Requires Monitor API data. Switch sources and load data to enable this priority.';
+      } else {
+        hint.textContent = option?.description || 'Select a ranking priority to break ties.';
+      }
+    }
+
+    function syncRowOrder() {
+      const rows = Array.from(rowsContainer.querySelectorAll('.a11y-ranking-row'));
+      const disableRemove = rows.length <= 1;
+      rows.forEach((row, index) => {
+        const label = row.querySelector('.a11y-ranking-row-label');
+        const removeBtn = row.querySelector('.a11y-ranking-row-remove');
+        label.textContent = `Priority ${index + 1}`;
+        removeBtn.setAttribute('aria-label', `Remove priority ${index + 1}`);
+        removeBtn.disabled = disableRemove;
+      });
+    }
+
+    function refreshOptionStates() {
+      const selects = Array.from(rowsContainer.querySelectorAll('select'));
+      const selectedValues = new Map();
+      selects.forEach(select => {
+        if (!select.value) return;
+        if (!selectedValues.has(select.value)) selectedValues.set(select.value, []);
+        selectedValues.get(select.value).push(select);
+      });
+      selects.forEach(select => {
+        const currentValue = select.value;
+        Array.from(select.options).forEach(option => {
+          const value = option.value;
+          if (!value) return;
+          const meta = getRankingFieldOption(value);
+          const takenElsewhere = value !== currentValue && selectedValues.has(value);
+          const gated = meta?.requiresApi && !isMonitorApiReadyForRanking();
+          option.disabled = takenElsewhere || (gated && value !== currentValue);
+        });
+      });
+      addRowBtn.disabled = selects.length >= rankingFieldOptions.length;
+    }
+
+    function setErrorSummary(message) {
+      errorSummary.textContent = message || '';
+    }
+
+    function clearRowError(rowEl) {
+      const select = rowEl.querySelector('select');
+      const error = rowEl.querySelector('.a11y-ranking-row-error');
+      rowEl.classList.remove('a11y-ranking-row--error');
+      if (select) {
+        select.removeAttribute('aria-invalid');
+        select.removeAttribute('aria-describedby');
+      }
+      if (error) error.textContent = '';
+    }
+
+    function setRowError(rowEl, message) {
+      const select = rowEl.querySelector('select');
+      const error = rowEl.querySelector('.a11y-ranking-row-error');
+      if (!select || !error) return;
+      const errorId = error.id || `${select.id}-error`;
+      error.id = errorId;
+      rowEl.classList.add('a11y-ranking-row--error');
+      error.textContent = message;
+      select.setAttribute('aria-invalid','true');
+      select.setAttribute('aria-describedby', errorId);
+    }
+
+    function updateChips() {
+      const selects = Array.from(rowsContainer.querySelectorAll('select'));
+      const activeCount = selects.filter(select => select.value).length;
+      appliedChipValue.textContent = `${activeCount} applied`;
+      const needsApi = selects.some(select => {
+        const option = getRankingFieldOption(select.value);
+        return Boolean(option?.requiresApi);
+      });
+      if (needsApi && !isMonitorApiReadyForRanking()) {
+        apiChipValue.textContent = 'Load data';
+        apiChip.classList.add('a11y-ranking-chip--alert');
+      } else if (needsApi && isMonitorApiReadyForRanking()) {
+        apiChipValue.textContent = 'Ready';
+        apiChip.classList.remove('a11y-ranking-chip--alert');
+      } else if (!needsApi && isMonitorApiReadyForRanking()) {
+        apiChipValue.textContent = 'Optional';
+        apiChip.classList.remove('a11y-ranking-chip--alert');
+      } else {
+        apiChipValue.textContent = 'Unavailable';
+        apiChip.classList.remove('a11y-ranking-chip--alert');
+      }
+    }
+
+    function getSelectedValues() {
+      return Array.from(rowsContainer.querySelectorAll('select')).map(select => select.value).filter(Boolean);
+    }
+
+    function validateRows() {
+      setErrorSummary('');
+      const selects = Array.from(rowsContainer.querySelectorAll('select'));
+      const used = new Set();
+      const values = [];
+      let firstInvalid = null;
+      selects.forEach(select => {
+        const rowEl = select.closest('.a11y-ranking-row');
+        clearRowError(rowEl);
+        const value = select.value;
+        if (!value) {
+          setRowError(rowEl, 'Select a ranking field for this priority.');
+          firstInvalid = firstInvalid || select;
+          return;
+        }
+        if (used.has(value)) {
+          setRowError(rowEl, 'Each ranking field can only be used once.');
+          firstInvalid = firstInvalid || select;
+          return;
+        }
+        if (!isRankingFieldAvailable(value)) {
+          setRowError(rowEl, 'Switch to the Monitor API to use this priority.');
+          firstInvalid = firstInvalid || select;
+          return;
+        }
+        used.add(value);
+        values.push(value);
+      });
+      if (firstInvalid) return { values: null, firstInvalid };
+      if (!values.length) {
+        setErrorSummary('Add at least one ranking priority before applying changes.');
+        return { values: null, firstInvalid: selects[0] || null };
+      }
+      return { values, firstInvalid: null };
+    }
+
+    function closeDialog({ applied = false, changed = false } = {}) {
+      document.removeEventListener('keydown', handleKeydown, true);
+      overlay.remove();
+      rankingState.dialog = null;
+      const focusTarget = rankingState.lastTrigger;
+      rankingState.lastTrigger = null;
+      if (focusTarget && typeof focusTarget.focus === 'function') {
+        focusTarget.focus();
+      }
+      if (applied && changed) {
+        refreshMainView({ preserveState: true, targetTabKey: 'ranking' }).catch(err => console.error(err));
+      }
+    }
+
+    function handleKeydown(event) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeDialog();
+        return;
+      }
+      if (event.key === 'Tab') {
+        const focusable = getFocusable(dialog);
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey) {
+          if (document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          }
+        } else if (document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    }
+
+    addRowBtn.addEventListener('click', () => {
+      rowsContainer.appendChild(createRow(''));
+      syncRowOrder();
+      refreshOptionStates();
+      setErrorSummary('');
+      updateChips();
+      const lastSelect = rowsContainer.querySelector('.a11y-ranking-row:last-child select');
+      lastSelect?.focus();
+    });
+
+    clearBtn.addEventListener('click', () => {
+      setRowsFromValues(['']);
+      rowsContainer.querySelector('select')?.focus();
+    });
+
+    resetBtn.addEventListener('click', () => {
+      setRowsFromValues(getDefaultRankingCriteria());
+      rowsContainer.querySelector('select')?.focus();
+    });
+
+    applyBtn.addEventListener('click', () => {
+      const { values, firstInvalid } = validateRows();
+      if (!values) {
+        firstInvalid?.focus();
+        return;
+      }
+      const previous = getRankingCriteria();
+      const changed = values.length !== previous.length || values.some((value, idx) => value !== previous[idx]);
+      setRankingCriteria(values);
+      closeDialog({ applied: true, changed });
+    });
+
+    cancelBtn.addEventListener('click', () => closeDialog());
+    closeBtn.addEventListener('click', () => closeDialog());
+    overlay.addEventListener('click', e => { if (e.target === overlay) closeDialog(); });
+    document.addEventListener('keydown', handleKeydown, true);
+
+    requestAnimationFrame(() => {
+      h2.focus();
     });
   }
 
