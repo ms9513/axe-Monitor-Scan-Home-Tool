@@ -204,8 +204,8 @@
   const markOpenRunStateStorageKey = 'a11y-mark-open-run-state';
   const quickActionsStepDelayMs = 1000;
   const wasApiBaseUrl = 'https://nyu-axemonitor.dequecloud.com/monitor-public-api/v1';
-  const wasApiKeyStorageKey = 'a11y-was-api-key';
-  let cachedWasApiKey = null;
+  const monitorApiKeyStorageKey = 'a11y-monitor-api-key';
+  let cachedMonitorApiKey = null;
   let currentFilters = { types: new Set(), domains: new Set(), statuses: new Set() }; // empty = all
   let currentSortMeta = { index: 0, direction: 'asc', field: 'name', type: 'text', label: 'scan name' };
   let currentTabKey = pageContext === 'issues' ? 'quick' : 'status';
@@ -533,6 +533,19 @@
       color: #333;
     }
     .a11y-scan-report-minimize:hover {
+      background: #f5f5f5;
+    }
+
+    .a11y-scan-report-settings {
+      padding: 5px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      border: 1px solid #c4c4c4;
+      background: #ffffff;
+      border-radius: 3px;
+      color: #333;
+    }
+    .a11y-scan-report-settings:hover {
       background: #f5f5f5;
     }
 
@@ -1749,33 +1762,40 @@
     return fallback;
   }
 
-  function getStoredWasApiKey() {
-    if (cachedWasApiKey != null) return cachedWasApiKey;
+  function getStoredMonitorApiKey() {
+    if (cachedMonitorApiKey != null) return cachedMonitorApiKey;
     try {
-      cachedWasApiKey = localStorage?.getItem(wasApiKeyStorageKey) || '';
+      cachedMonitorApiKey = localStorage?.getItem(monitorApiKeyStorageKey) || '';
     } catch (err) {
-      cachedWasApiKey = '';
+      cachedMonitorApiKey = '';
     }
-    return cachedWasApiKey;
+    return cachedMonitorApiKey;
   }
 
-  function setStoredWasApiKey(value) {
-    cachedWasApiKey = (value || '').trim();
+  function setStoredMonitorApiKey(value) {
+    cachedMonitorApiKey = (value || '').trim();
     try {
       const storage = localStorage;
       if (!storage) return;
-      if (cachedWasApiKey) {
-        storage.setItem(wasApiKeyStorageKey, cachedWasApiKey);
+      if (cachedMonitorApiKey) {
+        storage.setItem(monitorApiKeyStorageKey, cachedMonitorApiKey);
       } else {
-        storage.removeItem(wasApiKeyStorageKey);
+        storage.removeItem(monitorApiKeyStorageKey);
       }
     } catch (err) {
       // ignore storage errors
     }
+    try {
+      document.dispatchEvent(new CustomEvent('a11y-monitor-api-key-changed', {
+        detail: { value: cachedMonitorApiKey }
+      }));
+    } catch (err) {
+      // ignore event errors
+    }
   }
 
-  function ensureWasApiKey() {
-    const key = getStoredWasApiKey();
+  function ensureMonitorApiKey() {
+    const key = getStoredMonitorApiKey();
     if (!key) throw new Error('Deque Monitor API key not set.');
     return key;
   }
@@ -1794,7 +1814,7 @@
   }
 
   async function fetchWasApi(path, { signal } = {}) {
-    const apiKey = ensureWasApiKey();
+  const apiKey = ensureMonitorApiKey();
     const url = `${wasApiBaseUrl}${path}`;
     const res = await fetch(url, {
       method: 'GET',
@@ -7709,23 +7729,30 @@
     updateSummary();
 
     function updateApiKeyStatus() {
-      const hasKey = !!getStoredWasApiKey();
+      const hasKey = !!getStoredMonitorApiKey();
       apiKeyStatus.textContent = hasKey ? 'API key set' : 'API key missing';
       apiKeyStatus.style.color = hasKey ? '#1b5e20' : '#a4000f';
     }
     updateApiKeyStatus();
+
+    document.addEventListener('a11y-monitor-api-key-changed', updateApiKeyStatus);
 
     if (wasDataCache.status === 'ready' && Array.isArray(wasDataCache.data)) {
       renderWasTable(content, wasDataCache.data, wasDataCache.timestamp);
     }
 
     apiKeyBtn.addEventListener('click', async () => {
-      const existing = getStoredWasApiKey();
-      const value = await openApiKeyDialog(existing);
-      if (value === null) return;
-      setStoredWasApiKey(value || '');
-      updateApiKeyStatus();
-      apiKeyBtn.focus();
+      try {
+        const saved = await openSettingsDialog({ focusField: 'apiKey' });
+        if (saved) {
+          updateApiKeyStatus();
+        }
+      } catch (err) {
+        console.error(err);
+        alert(err?.message || 'Unable to open settings.');
+      } finally {
+        apiKeyBtn.focus();
+      }
     });
 
     editBtn.addEventListener('click', () => {
@@ -7755,7 +7782,7 @@
         alert('Select at least one WAS report to load.');
         return;
       }
-      if (!getStoredWasApiKey()) {
+      if (!getStoredMonitorApiKey()) {
         alert('Set the Deque Monitor API key before loading metrics.');
         return;
       }
@@ -8390,7 +8417,7 @@
       return;
     }
     try {
-      ensureWasApiKey();
+      ensureMonitorApiKey();
     } catch (err) {
       alert(err?.message || 'An API key is required.');
       return;
@@ -10810,82 +10837,96 @@
     });
   }
 
-  function openApiKeyDialog(currentValue = '') {
-    return new Promise(resolve => {
-      const overlay = document.createElement('div');
-      overlay.className = 'a11y-filter-overlay';
-      const dialog = document.createElement('div');
-      dialog.className = 'a11y-filter-dialog';
-      dialog.setAttribute('role','dialog');
-      dialog.setAttribute('aria-modal','true');
+  function openSettingsDialog({ focusField = 'apiKey' } = {}) {
+    return new Promise((resolve, reject) => {
+      try {
+        const overlay = document.createElement('div');
+        overlay.className = 'a11y-filter-overlay';
+        const dialog = document.createElement('div');
+        dialog.className = 'a11y-filter-dialog';
+        dialog.setAttribute('role','dialog');
+        dialog.setAttribute('aria-modal','true');
 
-      const header = document.createElement('div');
-      header.className = 'a11y-filter-header';
-      const h2 = document.createElement('h2');
-      h2.textContent = 'Set API key';
-      header.appendChild(h2);
-      dialog.appendChild(header);
+        const header = document.createElement('div');
+        header.className = 'a11y-filter-header';
+        const h2 = document.createElement('h2');
+        h2.textContent = 'Settings';
+        header.appendChild(h2);
+        dialog.appendChild(header);
 
-      const content = document.createElement('div');
-      content.className = 'a11y-filter-content';
-      const instructions = document.createElement('p');
-      instructions.textContent = 'Enter the Deque Monitor API key. It is stored locally in this browser.';
-      content.appendChild(instructions);
-      const label = document.createElement('label');
-      label.textContent = 'API key';
-      label.setAttribute('for','a11y-was-api-input');
-      content.appendChild(label);
-      const input = document.createElement('input');
-      input.type = 'password';
-      input.id = 'a11y-was-api-input';
-      input.value = currentValue || '';
-      input.style.width = '100%';
-      input.autocomplete = 'off';
-      content.appendChild(input);
-      dialog.appendChild(content);
+        const content = document.createElement('div');
+        content.className = 'a11y-filter-content';
+        const instructions = document.createElement('p');
+        instructions.textContent = 'Update settings for this accessibility helper. Values are stored locally in this browser.';
+        content.appendChild(instructions);
 
-      const footer = document.createElement('div');
-      footer.className = 'a11y-filter-footer';
-      const saveBtn = document.createElement('button');
-      saveBtn.type = 'button';
-      saveBtn.className = 'a11y-btn-primary';
-      saveBtn.textContent = 'Save';
-      const cancelBtn = document.createElement('button');
-      cancelBtn.type = 'button';
-      cancelBtn.className = 'a11y-btn-secondary';
-      cancelBtn.textContent = 'Cancel';
-      footer.appendChild(saveBtn);
-      footer.appendChild(cancelBtn);
-      dialog.appendChild(footer);
+        const apiLabel = document.createElement('label');
+        apiLabel.textContent = 'Deque Monitor API key';
+        apiLabel.setAttribute('for','a11y-settings-api-key');
+        content.appendChild(apiLabel);
+        const apiInput = document.createElement('input');
+        apiInput.type = 'password';
+        apiInput.id = 'a11y-settings-api-key';
+        apiInput.value = getStoredMonitorApiKey();
+        apiInput.style.width = '100%';
+        apiInput.autocomplete = 'off';
+        content.appendChild(apiInput);
 
-      overlay.appendChild(dialog);
-      appendOverlayAfterFooter(overlay);
+        const footer = document.createElement('div');
+        footer.className = 'a11y-filter-footer';
+        const saveBtn = document.createElement('button');
+        saveBtn.type = 'button';
+        saveBtn.className = 'a11y-btn-primary';
+        saveBtn.textContent = 'Save';
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'a11y-btn-secondary';
+        cancelBtn.textContent = 'Cancel';
+        footer.appendChild(saveBtn);
+        footer.appendChild(cancelBtn);
 
-      let closed = false;
-      const close = value => {
-        if (closed) return;
-        closed = true;
-        overlay.remove();
-        resolve(value);
-      };
+        dialog.appendChild(content);
+        dialog.appendChild(footer);
+        overlay.appendChild(dialog);
+        appendOverlayAfterFooter(overlay);
 
-      saveBtn.addEventListener('click', () => close(input.value.trim()));
-      input.addEventListener('keydown', e => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          close(input.value.trim());
+        let closed = false;
+        const close = saved => {
+          if (closed) return;
+          closed = true;
+          overlay.remove();
+          resolve(!!saved);
+        };
+
+        saveBtn.addEventListener('click', () => {
+          setStoredMonitorApiKey(apiInput.value || '');
+          close(true);
+        });
+        cancelBtn.addEventListener('click', () => close(false));
+        overlay.addEventListener('click', e => { if (e.target === overlay) close(false); });
+        dialog.addEventListener('keydown', e => {
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            close(false);
+          }
+        });
+        apiInput.addEventListener('keydown', e => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            setStoredMonitorApiKey(apiInput.value || '');
+            close(true);
+          }
+        });
+
+        // Manage initial focus
+        if (focusField === 'apiKey') {
+          apiInput.focus();
+        } else {
+          saveBtn.focus();
         }
-      });
-      cancelBtn.addEventListener('click', () => close(null));
-      overlay.addEventListener('click', e => { if (e.target === overlay) close(null); });
-      dialog.addEventListener('keydown', e => {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          close(null);
-        }
-      });
-
-      input.focus();
+      } catch (err) {
+        reject(err);
+      }
     });
   }
 
@@ -11792,13 +11833,27 @@
     minimizeBtn.textContent = 'Minimize';
     minimizeBtn.setAttribute('aria-label', minimizeAriaLabel);
 
+    const settingsBtn = document.createElement('button');
+    settingsBtn.type = 'button';
+    settingsBtn.className = 'a11y-scan-report-settings';
+    settingsBtn.textContent = 'Settings';
+    settingsBtn.setAttribute('aria-label','Open settings dialog');
+
+    settingsBtn.addEventListener('click', () => {
+      openSettingsDialog().catch(err => {
+        console.error(err);
+        alert(err?.message || 'Unable to open settings.');
+      });
+    });
+
     const closeBtn = document.createElement('button');
     closeBtn.type = 'button';
     closeBtn.className = 'Dialog__close';
     closeBtn.innerHTML = '<span aria-hidden="true" class="Icon Icon--close"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" height="24" width="24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="currentColor"></path></svg></span><span class="Offscreen">Close</span>';
-    minimizeBtn.addEventListener('click', () => minimizeModal());
-    actions.appendChild(minimizeBtn);
-    actions.appendChild(closeBtn);
+  minimizeBtn.addEventListener('click', () => minimizeModal());
+  actions.appendChild(minimizeBtn);
+  actions.appendChild(settingsBtn);
+  actions.appendChild(closeBtn);
 
     header.appendChild(actions);
     dialog.appendChild(header);
