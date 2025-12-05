@@ -2,21 +2,11 @@
   const isDequeHost = location.hostname.endsWith('dequecloud.com');
   const scanInsightsTabs = [
     { key: 'scoreTrend', label: 'Score Trend' },
-    { key: 'health', label: 'Health & trend' },
-    { key: 'progress', label: 'Progress & remediation' },
-    { key: 'coverage', label: 'Coverage & pages' }
+    { key: 'health', label: 'Issue trends' },
+    { key: 'progress', label: 'Progress & remediation' }
   ];
-  const scanInsightsIssueLimit = 1000;
-  const scanInsightsIssuePageSize = 200;
   const scanInsightsPageLimit = 400;
   const scanInsightsPagePageSize = 100;
-  const scanInsightsIssueWeights = {
-    critical: 5,
-    serious: 3,
-    moderate: 1,
-    minor: 0.5,
-    needsReview: 0
-  };
   const enablePageSummaryApiForMetrics = false;
   const scanInsightsState = {
     context: null,
@@ -472,10 +462,8 @@
       wrapper.textContent = `Score trend insights will summarize every available run for scan ${scanId || ''}.`;
     } else if (tabKey === 'progress') {
       wrapper.textContent = `Progress & remediation data will compare ${runLabel} with the previous run once analytics are available.`;
-    } else if (tabKey === 'coverage') {
-      wrapper.textContent = `Coverage & pages summaries will display page-level health information for scan ${scanId || ''}.`;
     } else {
-      wrapper.textContent = `Health & trend charts will load for scan ${scanId || ''} (${runLabel}).`;
+      wrapper.textContent = `Issue trend charts will load for scan ${scanId || ''} (${runLabel}).`;
     }
     return wrapper;
   }
@@ -529,11 +517,15 @@
       target.appendChild(buildScanInsightsPreface('health'));
       return;
     }
-    const recentRuns = sliceRecentRuns(runs, 3);
-    target.appendChild(buildScoreTrendSection(recentRuns));
+  const recentRuns = sliceRecentRuns(runs, 3);
+    const highImpactNote = document.createElement('p');
+    highImpactNote.className = 'a11y-scan-insights-note';
+    highImpactNote.textContent = 'High impact = Critical + Serious';
+    target.appendChild(highImpactNote);
+    const oldestRun = data?.oldest || runs[runs.length - 1] || null;
+    target.appendChild(buildHighImpactDeltaSection(data.latest, oldestRun));
     target.appendChild(buildIssuesImpactSection(recentRuns));
     target.appendChild(buildWeightedDensitySection(recentRuns));
-    target.appendChild(buildHighImpactDeltaSection(data.latest, data.previous));
   }
 
   function renderScanInsightsProgressTab(target, data) {
@@ -544,39 +536,9 @@
       target.appendChild(msg);
       return;
     }
-    const tab = getScanInsightsTabState('progress');
-    const table = buildDeltaTable(data.latest, data.previous);
+    const secondPrevious = data.completedRuns?.[2] || data.oldest || null;
+    const table = buildDeltaTable(data.latest, data.previous, secondPrevious);
     target.appendChild(buildScanInsightsSection('Run-over-run comparison', table));
-    if (tab.status === 'loading') {
-      target.appendChild(buildScanInsightsLoadingView('Comparing latest issues with the previous run…'));
-      return;
-    }
-    if (tab.status === 'error') {
-      target.appendChild(
-        buildScanInsightsErrorView(tab.error || 'Unable to load progress details.', {
-          onRetry: () => ensureProgressInsightsDetails().catch(err => console.warn('Progress insights reload failed', err))
-        })
-      );
-      return;
-    }
-    if (tab.status !== 'ready' || !tab.data) {
-      target.appendChild(buildScanInsightsPreface('progress'));
-      ensureProgressInsightsDetails().catch(err => console.warn('Progress insights load failed', err));
-      return;
-    }
-    target.appendChild(buildIssueChurnSection(tab.data));
-    target.appendChild(
-      buildRuleDeltaSection('Rules with regressions', tab.data.diff?.ruleRegressions?.slice(0, 5) || [], {
-        emptyMessage: 'No regressions detected between the two runs.'
-      })
-    );
-    target.appendChild(
-      buildRuleDeltaSection('Rules resolved', tab.data.diff?.ruleRemediations?.slice(0, 5) || [], {
-        emptyMessage: 'No resolved rules detected.',
-        intent: 'positive'
-      })
-    );
-    target.appendChild(buildPageDeltaSection(tab.data));
   }
 
   function renderScanInsightsCoverageTab(target, data) {
@@ -629,11 +591,12 @@
   function buildScoreTrendKpiSection(oldestRun, newestRun) {
     const section = document.createElement('section');
     section.className = 'a11y-scan-insights-section';
-    const heading = document.createElement('h3');
+    const heading = document.createElement('h2');
     heading.textContent = 'Score trend snapshot';
     section.appendChild(heading);
-    const grid = document.createElement('div');
-    grid.className = 'a11y-scan-insights-summary-grid';
+    const list = document.createElement('ul');
+    list.className = 'a11y-scan-insights-summary-grid a11y-scan-insights-impact-list';
+    list.setAttribute('role','list');
     const metricDefinitions = [
       {
         label: 'Accessibility score',
@@ -666,9 +629,13 @@
       }
     ];
     metricDefinitions.forEach(definition => {
-      grid.appendChild(createImpactSummaryCard(definition));
+      const item = document.createElement('li');
+      item.className = 'a11y-scan-insights-impact-item';
+      item.setAttribute('role','listitem');
+      item.appendChild(createImpactSummaryCard(definition));
+      list.appendChild(item);
     });
-    section.appendChild(grid);
+    section.appendChild(list);
     return section;
   }
 
@@ -677,7 +644,7 @@
     section.className = 'a11y-scan-insights-section';
     const headingId = createUniqueId('score-trend-chart');
     const summaryId = createUniqueId('score-trend-summary');
-    const heading = document.createElement('h3');
+    const heading = document.createElement('h2');
     heading.id = headingId;
     heading.textContent = 'Accessibility score trend';
     section.appendChild(heading);
@@ -697,10 +664,13 @@
       .filter(point => Number.isFinite(point.value));
     const newestScore = getScorePercent(newestRun);
     const oldestScore = getScorePercent(oldestRun);
-    const color = Number.isFinite(newestScore) && Number.isFinite(oldestScore)
-      ? newestScore >= oldestScore
-        ? '#4fa630'
-        : '#d93251'
+    const haveScores = Number.isFinite(newestScore) && Number.isFinite(oldestScore);
+    const color = haveScores
+      ? newestScore === oldestScore
+        ? '#475467'
+        : newestScore > oldestScore
+          ? '#4fa630'
+          : '#d93251'
       : 'var(--accent-primary)';
     const values = points.map(point => Number(point.value)).filter(Number.isFinite);
     const minScore = values.length ? Math.min(...values) : 0;
@@ -719,7 +689,8 @@
           Number.isFinite(point?.value) ? `${Number(point.value).toFixed(1)}%` : '—'
       }),
       {
-        caption: 'Line chart showing accessibility score changes for every completed run in chronological order.'
+        caption: 'Line chart showing accessibility score changes for every completed run in chronological order.',
+        title: 'Accessibility score trend'
       }
     );
     const captionEl = figure.querySelector('figcaption');
@@ -728,6 +699,7 @@
       figure.setAttribute('aria-labelledby', labelledBy);
     }
     section.appendChild(figure);
+    attachDownloadControls(section, 'Accessibility score trend');
     return section;
   }
 
@@ -740,13 +712,7 @@
       { header: 'Total issues', getValue: run => formatNumberValue(run?.totalIssues) },
       {
         header: 'Pages scanned',
-        getValue: run =>
-          formatNumberValue(
-            coerceNumber(
-              run?.pageIssueSummary?.completedPages ?? run?.pageIssueSummary?.totalPages ?? run?.totalPages,
-              Number.NaN
-            )
-          )
+        getValue: run => formatNumberValue(getCompletedPageCount(run))
       },
       { header: 'Pages with issues', getValue: run => formatNumberValue(calculatePagesWithIssues(run)) },
       { header: 'Pages with critical issues', getValue: run => formatNumberValue(coerceNumber(run?.pageCounts?.critical, Number.NaN)) }
@@ -760,7 +726,7 @@
   function buildScanInsightsSection(title, body) {
     const section = document.createElement('section');
     section.className = 'a11y-scan-insights-section';
-    const heading = document.createElement('h3');
+    const heading = document.createElement('h2');
     heading.textContent = title;
     section.appendChild(heading);
     if (Array.isArray(body)) {
@@ -773,6 +739,7 @@
       empty.textContent = 'No data available yet.';
       section.appendChild(empty);
     }
+    attachDownloadControls(section, title);
     return section;
   }
 
@@ -783,196 +750,137 @@
     return note;
   }
 
-  function buildIssueChurnSection(progressData) {
-    const totals = progressData?.diff?.totals || { newCount: 0, resolvedCount: 0, net: 0 };
-    const grid = document.createElement('div');
-    grid.className = 'a11y-scan-insights-summary-grid';
-    grid.appendChild(createMetricCard({ label: 'New issues', value: formatNumberValue(totals.newCount) }));
-    grid.appendChild(createMetricCard({ label: 'Resolved issues', value: formatNumberValue(totals.resolvedCount) }));
-    grid.appendChild(
-      createMetricCard({
-        label: 'Net change',
-        value: totals.net === 0 ? 'No change' : formatSignedValue(totals.net),
-        hint: 'Positive = more open issues'
-      })
-    );
-    const body = [grid];
-    if (progressData?.diff?.summaryByImpact) {
-      body.push(buildIssueSeverityTable(progressData.diff.summaryByImpact));
-    }
-    if (progressData?.comparedIssues?.truncatedLatest || progressData?.comparedIssues?.truncatedPrevious) {
-      body.push(
-        buildScanInsightsNote(
-          `Compared up to ${scanInsightsIssueLimit.toLocaleString()} issues per run. Totals may exceed what is shown.`
-        )
-      );
-    }
-    return buildScanInsightsSection('Issue churn since previous run', body);
-  }
-
-  function buildIssueSeverityTable(summary) {
-    const order = ['critical','serious','moderate','minor','needsReview'];
-    const table = document.createElement('table');
-    table.className = 'a11y-scan-insights-table';
-    const thead = document.createElement('thead');
-    const headRow = document.createElement('tr');
-    ['Impact','New','Resolved','Net'].forEach(label => {
-      const th = document.createElement('th');
-      th.textContent = label;
-      headRow.appendChild(th);
+  function attachDownloadControls(section, sectionTitle = '') {
+    if (!section) return;
+    const resolvedTitle = sectionTitle || section.querySelector('h3')?.textContent || 'scan insights';
+    const tables = section.querySelectorAll('table');
+    tables.forEach((table, index) => {
+      const filename = buildDownloadFilename(`${resolvedTitle} table ${index + 1}`, 'csv');
+      ensureTableDownloadWrapper(table, filename, { sectionTitle: resolvedTitle, tableIndex: index });
     });
-    thead.appendChild(headRow);
-    table.appendChild(thead);
-    const tbody = document.createElement('tbody');
-    order.forEach(key => {
-      const entry = summary[key];
-      if (!entry) return;
-      const tr = document.createElement('tr');
-      const th = document.createElement('th');
-      th.scope = 'row';
-      th.appendChild(createImpactBadge(entry.impact));
-      tr.appendChild(th);
-      const newCell = document.createElement('td');
-      newCell.textContent = formatNumberValue(entry.newCount);
-      tr.appendChild(newCell);
-      const resolvedCell = document.createElement('td');
-      resolvedCell.textContent = formatNumberValue(entry.resolvedCount);
-      tr.appendChild(resolvedCell);
-  const netCell = document.createElement('td');
-  const pill = createDeltaPill(entry.net);
-  netCell.appendChild(pill);
-      tr.appendChild(netCell);
-      tbody.appendChild(tr);
-    });
-    table.appendChild(tbody);
-    return table;
   }
 
-  function buildRuleDeltaSection(title, entries, { emptyMessage = 'No changes detected.' } = {}) {
-    if (!Array.isArray(entries) || !entries.length) {
-      return buildScanInsightsSection(title, buildScanInsightsNote(emptyMessage));
-    }
-    const list = document.createElement('ol');
-    list.className = 'a11y-scan-insights-list';
-    entries.forEach(entry => {
-      const item = document.createElement('li');
-      const head = document.createElement('div');
-      head.className = 'a11y-scan-insights-list-head';
-      const label = document.createElement('span');
-      label.className = 'a11y-scan-insights-list-title';
-      label.textContent = entry.ruleSummary || entry.ruleId || entry.pageTitle || 'Untitled';
-      head.appendChild(label);
-      if (entry.impact) {
-        head.appendChild(createImpactBadge(entry.impact));
-      }
-  const pill = createDeltaPill(entry.delta);
-      head.appendChild(pill);
-      item.appendChild(head);
-      const meta = document.createElement('p');
-      meta.className = 'a11y-scan-insights-note';
-      const newCount = formatNumberValue(entry.newCount);
-      const resolvedCount = formatNumberValue(entry.resolvedCount);
-      meta.textContent = `New: ${newCount} • Resolved: ${resolvedCount}${entry.pageSamples?.length ? ` • Pages: ${entry.pageSamples.join(', ')}` : ''}`;
-      item.appendChild(meta);
-      list.appendChild(item);
-    });
-    return buildScanInsightsSection(title, list);
-  }
-
-  function createImpactBadge(impact) {
-    const pill = document.createElement('span');
-    pill.className = `a11y-scan-insights-pill is-${impact || 'unknown'}`;
-    pill.textContent = formatImpactLabel(impact);
-    return pill;
-  }
-
-  function formatImpactLabel(impact) {
-    if (!impact) return 'Unknown';
-    if (impact === 'needsReview') return 'Needs review';
-    return capitalizeFirstLetter(impact);
-  }
-
-  function createDeltaPill(delta, { preferLower = true } = {}) {
-    const pill = document.createElement('span');
-    pill.className = 'a11y-scan-insights-pill';
-    const formatted = typeof delta === 'number' && delta > 0 ? `+${delta}` : String(delta);
-    pill.textContent = delta == null ? '0' : formatted;
-    if (delta > 0) {
-      pill.classList.add(preferLower ? 'is-negative' : 'is-positive');
-    } else if (delta < 0) {
-      pill.classList.add(preferLower ? 'is-positive' : 'is-negative');
-    } else {
-      pill.classList.add('is-neutral');
-    }
-    return pill;
-  }
-
-  function buildPageDeltaSection(progressData) {
-    const regressions = progressData?.diff?.pageRegressions || [];
-    const improvements = progressData?.diff?.pageImprovements || [];
-    if (!regressions.length && !improvements.length) {
-      return buildScanInsightsSection('Page improvements & regressions', buildScanInsightsNote('No page-level changes detected between the two runs.'));
-    }
+  function ensureTableDownloadWrapper(table, filename, { sectionTitle, tableIndex } = {}) {
+    if (!table || table.closest('.a11y-download-block')) return;
+    const parent = table.parentNode;
+    if (!parent) return;
     const wrapper = document.createElement('div');
-    wrapper.className = 'a11y-scan-insights-two-col';
-    wrapper.appendChild(buildPageDeltaTable('Regressions', regressions.slice(0, 5)));
-    wrapper.appendChild(buildPageDeltaTable('Improvements', improvements.slice(0, 5)));
-    return buildScanInsightsSection('Page improvements & regressions', wrapper);
+    wrapper.className = 'a11y-download-block';
+    const actions = document.createElement('div');
+    actions.className = 'a11y-download-actions';
+    const ariaLabel = buildDownloadAriaLabel(sectionTitle, tableIndex);
+    const button = createDownloadButton('Download CSV', () => downloadTableAsCsv(table, filename), { ariaLabel });
+    actions.appendChild(button);
+    wrapper.appendChild(actions);
+    parent.insertBefore(wrapper, table);
+    wrapper.appendChild(table);
   }
 
-  function buildPageDeltaTable(label, entries) {
-    const container = document.createElement('div');
-    container.className = 'a11y-scan-insights-subsection';
-    const heading = document.createElement('p');
-    heading.className = 'a11y-scan-insights-subheading';
-    heading.textContent = label;
-    container.appendChild(heading);
-    if (!entries.length) {
-      container.appendChild(buildScanInsightsNote('No changes detected.'));
-      return container;
+  function buildDownloadAriaLabel(sectionTitle, tableIndex) {
+    const title = sectionTitle?.trim();
+    const suffix = Number.isInteger(tableIndex) ? `table ${tableIndex + 1}` : null;
+    if (title && suffix) {
+      return `Download ${title} ${suffix} data as CSV`;
     }
-    const table = document.createElement('table');
-    table.className = 'a11y-scan-insights-table';
-    const thead = document.createElement('thead');
-    const headRow = document.createElement('tr');
-    ['Page','New','Resolved','Net'].forEach(text => {
-      const th = document.createElement('th');
-      th.textContent = text;
-      headRow.appendChild(th);
-    });
-    thead.appendChild(headRow);
-    table.appendChild(thead);
-    const tbody = document.createElement('tbody');
-    entries.forEach(entry => {
-      const tr = document.createElement('tr');
-      const pageCell = document.createElement('th');
-      pageCell.scope = 'row';
-      if (entry.pageUrl) {
-        const link = document.createElement('a');
-        link.href = entry.pageUrl;
-        link.target = '_blank';
-        link.rel = 'noreferrer noopener';
-        link.className = 'a11y-scan-insights-link';
-        link.textContent = entry.pageTitle || entry.pageUrl;
-        pageCell.appendChild(link);
-      } else {
-        pageCell.textContent = entry.pageTitle || 'Untitled page';
+    if (title) {
+      return `Download ${title} data as CSV`;
+    }
+    return 'Download scan insight table as CSV';
+  }
+
+  function createDownloadButton(label, onClick, { ariaLabel } = {}) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'a11y-download-button';
+    button.textContent = label;
+    button.setAttribute('aria-label', ariaLabel || label);
+    button.addEventListener('click', () => {
+      try {
+        onClick();
+      } catch (err) {
+        console.warn('Download failed', err);
+        alert('Unable to download right now. Please try again.');
       }
-      tr.appendChild(pageCell);
-      const newCell = document.createElement('td');
-      newCell.textContent = formatNumberValue(entry.newCount);
-      tr.appendChild(newCell);
-      const resolvedCell = document.createElement('td');
-      resolvedCell.textContent = formatNumberValue(entry.resolvedCount);
-      tr.appendChild(resolvedCell);
-  const netCell = document.createElement('td');
-  netCell.appendChild(createDeltaPill(entry.delta));
-      tr.appendChild(netCell);
-      tbody.appendChild(tr);
     });
-    table.appendChild(tbody);
-    container.appendChild(table);
-    return container;
+    return button;
+  }
+
+  function downloadTableAsCsv(table, filename = 'table.csv') {
+    if (!table) return;
+    const rows = Array.from(table.rows || []);
+    if (!rows.length) return;
+    const scanLabel = getScanExportLabel();
+    const csvLines = rows.map(row => {
+      const isHeaderRow = row.closest('thead') != null;
+      const prefix = isHeaderRow ? 'Scan' : scanLabel;
+      const isCurrentRunRow = !isHeaderRow && row.getAttribute('data-current-run') === 'true';
+      const cells = Array.from(row.cells || []);
+      const values = [
+        prefix,
+        ...cells.map((cell, cellIndex) => {
+          const badge = cell.querySelector('.a11y-scan-insights-current-label');
+          let text = cell.textContent == null ? '' : cell.textContent.trim();
+          if (badge) {
+            const badgeText = badge.textContent?.trim();
+            if (badgeText) {
+              text = text.replace(badgeText, '').trim();
+            }
+          }
+          if (isCurrentRunRow && cellIndex === 0) {
+            text = text ? `${text} (current run)` : '(current run)';
+          }
+          return text;
+        })
+      ];
+      return values
+        .map(text => {
+          const safe = (text || '').replace(/"/g, '""');
+          return `"${safe}"`;
+        })
+        .join(',');
+    });
+    const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    triggerFileDownload(blob, filename);
+  }
+
+  function triggerFileDownload(blob, filename) {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
+  function slugify(text) {
+    if (!text) return 'download';
+    return text
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'download';
+  }
+
+  function getScanExportLabel() {
+    const scanName = getScanBreadcrumbName();
+    const scanId = scanInsightsState?.context?.scanId;
+    if (scanName && scanId != null) return `${scanName} - scan ${scanId}`;
+    if (scanName) return scanName;
+    if (scanId != null) return `Scan ${scanId}`;
+    return 'Current scan';
+  }
+
+  function buildDownloadFilename(sectionLabel, extension) {
+    const scanLabel = getScanExportLabel();
+    const rawName = `${scanLabel} - ${sectionLabel}`.trim();
+    const safeName = rawName
+      .replace(/[\\/:*?"<>|]+/g, '-')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return `${safeName}.${extension}`;
   }
 
   function buildPageHealthSummarySection(stats) {
@@ -1113,12 +1021,20 @@
     return Math.min(100, Math.max(0, num));
   }
 
-  function wrapChartWithFigure(content, { caption, labelId } = {}) {
+  function wrapChartWithFigure(content, { caption, labelId, title } = {}) {
     const figure = document.createElement('figure');
     figure.className = 'a11y-scan-insights-figure';
     figure.setAttribute('role','img');
+    const chartId = createUniqueId('chart');
+    figure.dataset.chartId = chartId;
     const id = labelId || `a11y-scan-insights-caption-${Math.random().toString(36).slice(2)}`;
     figure.setAttribute('aria-labelledby', id);
+    if (title) {
+      const heading = document.createElement('p');
+      heading.className = 'a11y-chart-heading';
+      heading.textContent = title;
+      figure.appendChild(heading);
+    }
     if (content) {
       figure.appendChild(content);
     }
@@ -1251,57 +1167,6 @@
     return `${prefix}-${Math.random().toString(36).slice(2, 9)}`;
   }
 
-  function buildScoreTrendSection(runs) {
-    const chronologicalRuns = getChronologicalRuns(runs);
-    const currentRunNumber = runs?.[0]?.runNumber ?? null;
-    const points = buildChronologicalPoints(
-      runs,
-      (run, meta) => ({
-        label: formatRunLabel(run),
-        value: clampPercent(run?.score),
-        subtitle: formatDateTimeLabel(run?.completedAt) || 'Completion pending',
-        isCurrent: meta.isCurrent
-      }),
-      { currentRunNumber }
-    );
-    const values = points.map(point => point.value).filter(value => Number.isFinite(value));
-    const stats = values.length
-      ? {
-          min: Math.max(0, Math.min(...values)),
-          max: Math.min(100, Math.max(...values))
-        }
-      : { min: 0, max: 100 };
-    let yMin = Math.max(0, stats.min - 5);
-    let yMax = Math.min(100, stats.max + 5);
-    if (yMax - yMin < 10) {
-      yMax = Math.min(100, yMin + 10);
-    }
-    const chartFigure = wrapChartWithFigure(
-      createLineChart(points, {
-        yMin,
-        yMax,
-        color: 'var(--accent-primary)',
-        valueFormatter: value => (Number.isFinite(value) ? `${value.toFixed(1)}%` : '—'),
-        xLabel: 'Runs (oldest → newest)',
-        yLabel: 'Score (%)'
-      }),
-      {
-        caption: 'Line chart showing accessibility score trend for recent runs; the current run is highlighted.'
-      }
-    );
-    const table = buildRunTable(chronologicalRuns, [
-      { header: 'Run', getValue: run => formatRunLabel(run), isRowHeader: true },
-      { header: 'Completed at', getValue: run => formatDateTimeLabel(run?.completedAt) || '—' },
-      { header: 'Score', getValue: run => formatScoreValue(run?.score) },
-      { header: 'Total issues', getValue: run => formatNumberValue(run?.totalIssues) },
-      { header: 'Pages total', getValue: run => formatNumberValue(run?.totalPages) }
-    ], {
-      caption: 'Table of run scores, completion dates, totals, ordered from oldest to newest. Current run is flagged.',
-      highlightRunNumber: currentRunNumber
-    });
-    return buildScanInsightsSection('Score over recent runs', [chartFigure, table]);
-  }
-
   function buildIssuesImpactSection(runs) {
     const chronologicalRuns = getChronologicalRuns(runs);
     const currentRunNumber = runs?.[0]?.runNumber ?? null;
@@ -1310,7 +1175,8 @@
         highlightRunNumber: currentRunNumber
       }),
       {
-        caption: 'Stacked bars showing issue counts by impact level for recent runs; current run highlighted with total and high-impact callouts.'
+        caption: 'Stacked bars showing issue counts by impact level for recent runs; current run highlighted with total and high-impact callouts.',
+        title: 'Issues by impact across runs'
       }
     );
     const table = buildRunTable(chronologicalRuns, [
@@ -1341,12 +1207,36 @@
       (run, meta) => ({
         label: formatRunLabel(run),
         value: calculateWeightedDensity(run),
-        subtitle: `${formatNumberValue(run?.totalPages)} pages`,
+        subtitle: (() => {
+          const completedPages = getCompletedPageCount(run);
+          const formatted = formatNumberValue(completedPages);
+          return formatted === '—' ? 'Pages scanned —' : `${formatted} pages scanned`;
+        })(),
         isCurrent: meta.isCurrent
       }),
       { currentRunNumber }
     );
+    points.forEach((point, index) => {
+      if (index === 0) return;
+      const previousPoint = points[index - 1];
+      if (!Number.isFinite(point?.value) || !Number.isFinite(previousPoint?.value)) return;
+      const delta = point.value - previousPoint.value;
+      if (delta === 0) return;
+      point.trendDelta = delta;
+      point.trendDirection = delta > 0 ? 'increase' : 'decrease';
+    });
     const values = points.map(point => point.value).filter(value => Number.isFinite(value));
+    const firstFinitePoint = points.find(point => Number.isFinite(point?.value)) || null;
+    const lastFinitePoint = [...points].reverse().find(point => Number.isFinite(point?.value)) || null;
+    let densityColor = '#475467';
+    if (Number.isFinite(firstFinitePoint?.value) && Number.isFinite(lastFinitePoint?.value)) {
+      const change = lastFinitePoint.value - firstFinitePoint.value;
+      if (change > 0) {
+        densityColor = '#d93251';
+      } else if (change < 0) {
+        densityColor = '#1a7f37';
+      }
+    }
     const stats = values.length
       ? {
           min: Math.min(...values),
@@ -1360,63 +1250,87 @@
       createLineChart(points, {
         yMin,
         yMax,
-        color: '#0f172a',
-        valueFormatter: value => (Number.isFinite(value) ? value.toFixed(3) : '—'),
+        color: densityColor,
+        valueFormatter: value => formatPercent(value, 1),
         xLabel: 'Runs (oldest → newest)',
-        yLabel: 'Weighted issues per page'
+        yLabel: 'Weighted issue density (%)',
+        showPointLabels: true,
+        pointLabelFormatter: point => formatPercent(point.value, 1)
       }),
       {
-        caption: 'Line chart of severity-weighted issue density per run; the current run is highlighted.'
+        caption: 'Line chart of severity-weighted issue density per run; the current run is highlighted.',
+        title: 'Severity-weighted issue density'
       }
     );
+    const explanation = document.createElement('div');
+    explanation.className = 'a11y-scan-insights-note a11y-scan-insights-formula-note';
+    const scoreLine = document.createElement('p');
+    const scoreLabel = document.createElement('strong');
+    scoreLabel.textContent = 'Weighted score';
+    scoreLine.appendChild(scoreLabel);
+  scoreLine.appendChild(document.createTextNode(' = (Critical × 5) + (Serious × 3) + (Moderate × 1); minor issues are excluded to keep the focus on higher-impact findings.'));
+    const densityLine = document.createElement('p');
+    const densityLabel = document.createElement('strong');
+    densityLabel.textContent = 'Weighted density';
+    densityLine.appendChild(densityLabel);
+    densityLine.appendChild(document.createTextNode(' = Weighted score ÷ pages scanned (expressed as a percentage).'));
+    explanation.appendChild(scoreLine);
+    explanation.appendChild(densityLine);
     const table = buildRunTable(chronologicalRuns, [
       { header: 'Run', getValue: run => formatRunLabel(run), isRowHeader: true },
-      { header: 'Pages', getValue: run => formatNumberValue(run?.totalPages) },
+  { header: 'Pages scanned', getValue: run => formatNumberValue(getCompletedPageCount(run)) },
       { header: 'Weighted score', getValue: run => formatNumberValue(calculateWeightedScore(run)) },
       { header: 'Weighted density', getValue: run => {
         const density = calculateWeightedDensity(run);
-        return Number.isFinite(density) ? density.toFixed(3) : '—';
+        return Number.isFinite(density) ? formatPercent(density, 1) : '—';
       }}
     ], {
       caption: 'Weighted density metrics per run ordered from oldest to newest.',
       highlightRunNumber: currentRunNumber
     });
-    return buildScanInsightsSection('Severity-weighted issue density', [chartFigure, table]);
+    const chartId = chartFigure?.dataset?.chartId;
+    if (chartId) {
+      explanation.dataset.chartCompanionFor = chartId;
+      if (table?.setAttribute) {
+        table.dataset.chartCompanionFor = chartId;
+      }
+    }
+    return buildScanInsightsSection('Severity-weighted issue density', [chartFigure, explanation, table]);
   }
 
-  function buildHighImpactDeltaSection(latest, previous) {
-    if (!latest || !previous) {
+  function buildHighImpactDeltaSection(latest, oldest) {
+    if (!latest || !oldest || latest?.runNumber === oldest?.runNumber) {
       const msg = document.createElement('p');
       msg.className = 'a11y-scan-insights-placeholder';
       msg.textContent = 'At least two completed runs are required to compare high-impact issues.';
-      return buildScanInsightsSection('High-impact issues vs last run', msg);
+      return buildScanInsightsSection('High-impact issues vs last runs', msg);
     }
     const latestHigh = calculateHighImpactCount(latest);
-    const previousHigh = calculateHighImpactCount(previous);
-    const badge = createDeltaBadge(latestHigh, previousHigh, {
+    const oldestHigh = calculateHighImpactCount(oldest);
+    const badge = createDeltaBadge(latestHigh, oldestHigh, {
       preferLower: true,
       showDirectionText: true
     });
-    const difference = latestHigh - previousHigh;
-    const percentChange = previousHigh ? (difference / previousHigh) : null;
-    let description = 'No change compared to the previous run.';
+    const difference = latestHigh - oldestHigh;
+    const percentChange = oldestHigh ? (difference / oldestHigh) : null;
+    let description = 'No change compared to the previous runs.';
     if (difference > 0) {
       description = `High-impact issues increased by ${formatNumberValue(difference)}${
         Number.isFinite(percentChange) ? ` (${formatPercent(percentChange, 1)})` : ''
-      } compared to the previous run.`;
+      } compared to the previous runs.`;
     } else if (difference < 0) {
       description = `High-impact issues decreased by ${formatNumberValue(Math.abs(difference))}${
         Number.isFinite(percentChange) ? ` (${formatPercent(Math.abs(percentChange), 1)})` : ''
-      } compared to the previous run.`;
+      } compared to the previous runs.`;
     }
     const card = createMetricCard({
-      label: 'High-impact issues vs last run',
+      label: 'High-impact issues vs last runs',
       value: formatNumberValue(latestHigh),
-      hint: `Previous run: ${formatNumberValue(previousHigh)}`,
+      hint: `Previous runs: ${formatNumberValue(oldestHigh)}`,
       description,
       delta: badge
     });
-    return buildScanInsightsSection('High-impact issues vs last run', card);
+    return buildScanInsightsSection('High-impact issues vs last runs', card);
   }
 
   function buildChronologicalPoints(runs, mapper, { currentRunNumber } = {}) {
@@ -1439,8 +1353,6 @@
     yMax = null,
     color = 'var(--accent-primary)',
     valueFormatter = formatNumberValue,
-    xLabel = 'Runs',
-    yLabel = 'Value',
     showPointLabels = false,
     pointLabelFormatter
   } = {}) {
@@ -1524,17 +1436,6 @@
     const legend = createLegendList(points, valueFormatter);
     const wrapper = document.createElement('div');
     wrapper.className = 'a11y-scan-insights-line';
-    const axisLabels = document.createElement('div');
-    axisLabels.className = 'a11y-scan-insights-axis-labels';
-    const yAxisLabel = document.createElement('span');
-    yAxisLabel.className = 'a11y-scan-insights-axis-label is-y-axis';
-    yAxisLabel.textContent = yLabel;
-    const xAxisLabel = document.createElement('span');
-    xAxisLabel.className = 'a11y-scan-insights-axis-label is-x-axis';
-    xAxisLabel.textContent = xLabel;
-    axisLabels.appendChild(yAxisLabel);
-    axisLabels.appendChild(xAxisLabel);
-    wrapper.appendChild(axisLabels);
     wrapper.appendChild(svg);
     wrapper.appendChild(legend);
     return wrapper;
@@ -1567,6 +1468,19 @@
         subtitle.className = 'a11y-scan-insights-line-subtitle';
         subtitle.textContent = point.subtitle;
         item.appendChild(subtitle);
+      }
+      if (point.trendDirection) {
+        const trendLabel = document.createElement('span');
+        trendLabel.className = `a11y-scan-insights-trend-chip is-${point.trendDirection}`;
+        const deltaValue = Number(point.trendDelta);
+        const percentText = Number.isFinite(deltaValue)
+          ? formatPercent(Math.abs(deltaValue), 1)
+          : '';
+        const arrow = point.trendDirection === 'increase' ? '▲' : '▼';
+        const sign = point.trendDirection === 'increase' ? '+' : '-';
+        trendLabel.textContent = percentText ? `${arrow} ${sign}${percentText}` : arrow;
+        trendLabel.style.color = point.trendDirection === 'increase' ? '#d93251' : '#1a7f37';
+        item.appendChild(trendLabel);
       }
       item.appendChild(value);
       legend.appendChild(item);
@@ -1634,10 +1548,6 @@
     });
     const legend = document.createElement('div');
     legend.className = 'a11y-scan-insights-stack-legend';
-    const highLegend = document.createElement('span');
-    highLegend.className = 'a11y-scan-insights-stack-legend-item is-high';
-    highLegend.textContent = 'High impact = Critical + Serious';
-    legend.appendChild(highLegend);
     segments.forEach(segment => {
       const item = document.createElement('span');
       item.className = `a11y-scan-insights-stack-legend-item is-${segment.key}`;
@@ -1715,9 +1625,23 @@
 
   function calculateWeightedDensity(run) {
     const weightedScore = calculateWeightedScore(run);
-    const pages = Math.max(1, Number(run?.totalPages) || 1);
+    const completedPages = getCompletedPageCount(run);
+    const pages = Math.max(1, Number.isFinite(completedPages) ? completedPages : 1);
     const density = weightedScore / pages;
     return Number.isFinite(density) ? density : null;
+  }
+
+  function getCompletedPageCount(run) {
+    if (!run) return null;
+    const summary = run.pageIssueSummary || null;
+    const value = coerceNumber(
+      summary?.completedPages ??
+      summary?.totalPages ??
+      run.completedPages ??
+      run.totalPages,
+      Number.NaN
+    );
+    return Number.isFinite(value) ? value : null;
   }
 
   function formatPercent(value, fractionDigits = 1) {
@@ -1729,11 +1653,11 @@
     return run?.runNumber != null ? `Run #${run.runNumber}` : 'Run —';
   }
 
-  function buildDeltaTable(latest, previous) {
+  function buildDeltaTable(latest, previous, secondPrevious) {
     const rows = [
       {
         label: 'Accessibility score',
-        getLatest: run => getScorePercent(run),
+        getValue: run => getScorePercent(run),
         formatter: value => formatScoreValue(value),
         preferLower: false,
         fractionDigits: 1,
@@ -1741,43 +1665,43 @@
       },
       {
         label: 'Total issues',
-        getLatest: run => run?.totalIssues,
+        getValue: run => run?.totalIssues,
         formatter: formatNumberValue,
         preferLower: true
       },
       {
         label: 'Critical issues',
-        getLatest: run => run?.issueCounts?.critical,
+        getValue: run => run?.issueCounts?.critical,
         formatter: formatNumberValue,
         preferLower: true
       },
       {
         label: 'Serious issues',
-        getLatest: run => run?.issueCounts?.serious,
+        getValue: run => run?.issueCounts?.serious,
         formatter: formatNumberValue,
         preferLower: true
       },
       {
         label: 'Moderate issues',
-        getLatest: run => run?.issueCounts?.moderate,
+        getValue: run => run?.issueCounts?.moderate,
         formatter: formatNumberValue,
         preferLower: true
       },
       {
         label: 'Minor issues',
-        getLatest: run => run?.issueCounts?.minor,
+        getValue: run => run?.issueCounts?.minor,
         formatter: formatNumberValue,
         preferLower: true
       },
       {
         label: 'Pages with issues',
-        getLatest: run => calculatePagesWithIssues(run),
+        getValue: run => calculatePagesWithIssues(run),
         formatter: formatNumberValue,
         preferLower: true
       },
       {
         label: 'Pages scanned',
-        getLatest: run => run?.totalPages,
+        getValue: run => getCompletedPageCount(run),
         formatter: formatNumberValue,
         preferLower: false
       }
@@ -1786,40 +1710,74 @@
     table.className = 'a11y-scan-insights-table';
     const thead = document.createElement('thead');
     const headRow = document.createElement('tr');
-    ['Metric','Latest run','Previous run','Δ'].forEach(text => {
+    const columnDefs = [
+      { type: 'label', text: 'Metric' },
+      { type: 'delta', text: 'Δ' },
+      { type: 'run', text: formatRunLabel(secondPrevious) },
+      { type: 'run', text: formatRunLabel(previous) },
+      { type: 'run', text: formatRunLabel(latest), isCurrent: true }
+    ];
+    columnDefs.forEach(def => {
       const th = document.createElement('th');
-      th.textContent = text;
+      if (def.type === 'label' || def.type === 'delta') {
+        th.textContent = def.text;
+      } else {
+        th.textContent = def.text;
+        if (def.isCurrent) {
+          th.classList.add('has-current-label');
+          const badge = document.createElement('span');
+          badge.className = 'a11y-scan-insights-current-label';
+          badge.textContent = 'Current run';
+          th.appendChild(document.createTextNode(' '));
+          th.appendChild(badge);
+        }
+      }
       headRow.appendChild(th);
     });
     thead.appendChild(headRow);
     table.appendChild(thead);
     const tbody = document.createElement('tbody');
     rows.forEach(row => {
-      const latestValue = typeof row.getLatest === 'function' ? row.getLatest(latest) : null;
-      const previousValue = typeof row.getLatest === 'function' ? row.getLatest(previous) : null;
+      const getValue = typeof row.getValue === 'function' ? row.getValue : () => null;
+      const dataPoints = {
+        secondPrevious: getValue(secondPrevious),
+        previous: getValue(previous),
+        latest: getValue(latest)
+      };
       const tr = document.createElement('tr');
       const labelCell = document.createElement('th');
       labelCell.scope = 'row';
       labelCell.textContent = row.label;
       tr.appendChild(labelCell);
-      const latestCell = document.createElement('td');
-      latestCell.textContent = typeof row.formatter === 'function' ? row.formatter(latestValue) : formatNumberValue(latestValue);
-      tr.appendChild(latestCell);
-      const prevCell = document.createElement('td');
-      prevCell.textContent = typeof row.formatter === 'function' ? row.formatter(previousValue) : formatNumberValue(previousValue);
-      tr.appendChild(prevCell);
+      const baselineValue = dataPoints.secondPrevious != null
+        ? dataPoints.secondPrevious
+        : dataPoints.previous;
       const deltaCell = document.createElement('td');
-      const delta = createDeltaBadge(latestValue, previousValue, {
+      const deltaBadge = createDeltaBadge(dataPoints.latest, baselineValue, {
         preferLower: row.preferLower,
         fractionDigits: row.fractionDigits,
         suffix: row.suffix
       });
-      if (delta) {
-        deltaCell.appendChild(delta);
+      if (deltaBadge) {
+        deltaCell.appendChild(deltaBadge);
       } else {
         deltaCell.textContent = '—';
       }
       tr.appendChild(deltaCell);
+      const runCells = [
+        { key: 'secondPrevious', value: dataPoints.secondPrevious },
+        { key: 'previous', value: dataPoints.previous },
+        { key: 'latest', value: dataPoints.latest }
+      ];
+      runCells.forEach(cell => {
+        const td = document.createElement('td');
+        const formattedValue = typeof row.formatter === 'function'
+          ? row.formatter(cell.value)
+          : formatNumberValue(cell.value);
+        const valueText = document.createTextNode(formattedValue == null || formattedValue === '' ? '—' : formattedValue);
+        td.appendChild(valueText);
+        tr.appendChild(td);
+      });
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
@@ -2227,10 +2185,31 @@
   function updateScanInsightsSubtitle() {
     if (!scanInsightsState.subtitleEl) return;
     const { scanId, runNumber } = scanInsightsState.context || {};
+    const scanName = getScanBreadcrumbName();
     const subtitleRunLabel = runNumber != null ? `run ${runNumber}` : 'latest run';
+    if (scanName) {
+      if (scanId != null) {
+        scanInsightsState.subtitleEl.textContent = `Snapshot for ${scanName} (scan ${scanId} - ${subtitleRunLabel})`;
+      } else {
+        scanInsightsState.subtitleEl.textContent = `Snapshot for ${scanName} (${subtitleRunLabel})`;
+      }
+      return;
+    }
     scanInsightsState.subtitleEl.textContent = scanId
       ? `Snapshot for scan ${scanId} (${subtitleRunLabel})`
       : `Snapshot of the ${subtitleRunLabel}`;
+  }
+
+  function getScanBreadcrumbName() {
+    try {
+      const nav = document.querySelector('nav.Breadcrumb');
+      if (!nav) return null;
+      const current = nav.querySelector('[aria-current="location"]');
+      const text = current?.textContent?.trim();
+      return text || null;
+    } catch (err) {
+      return null;
+    }
   }
 
   function renderScanInsightsDialog(body, footer) {
@@ -2310,7 +2289,7 @@
       panel.dataset.tabKey = tab.key;
       panel.setAttribute('role','tabpanel');
       panel.setAttribute('aria-labelledby', tabId);
-  panel.tabIndex = -1;
+    panel.tabIndex = 0;
       panel.hidden = !isSelected;
       panelsWrap.appendChild(panel);
       scanInsightsState.panels.set(tab.key, panel);
@@ -2319,10 +2298,15 @@
       }
     });
 
-    const footerNote = document.createElement('p');
-    footerNote.className = 'a11y-scan-insights-footer-note';
-    footerNote.textContent = 'Insights update automatically when scan data is refreshed.';
-    footer.appendChild(footerNote);
+    const refreshBtn = document.createElement('button');
+    refreshBtn.type = 'button';
+    refreshBtn.className = 'Button Button--secondary Button--thin a11y-scan-insights-refresh-btn';
+    refreshBtn.textContent = 'Refresh data';
+    refreshBtn.setAttribute('aria-label', 'Refresh scan insights data');
+    refreshBtn.addEventListener('click', () => {
+      retryScanInsightsLoad();
+    });
+    footer.appendChild(refreshBtn);
 
     ensureScanInsightsData().catch(err => console.warn('Scan insights load failed', err));
   }
@@ -2379,8 +2363,6 @@
       renderScanInsightsScoreTrendTab(target, scanInsightsState.data);
     } else if (tabKey === 'progress') {
       renderScanInsightsProgressTab(target, scanInsightsState.data);
-    } else if (tabKey === 'coverage') {
-      renderScanInsightsCoverageTab(target, scanInsightsState.data);
     } else {
       renderScanInsightsHealthTab(target, scanInsightsState.data);
     }
@@ -2543,58 +2525,6 @@
     return loadPromise;
   }
 
-  function ensureProgressInsightsDetails() {
-    const base = scanInsightsState.data;
-    const tab = getScanInsightsTabState('progress');
-    if (!base?.latest || !base?.previous) {
-      tab.status = 'error';
-      tab.error = 'At least two completed runs are required to compare progress.';
-      return Promise.reject(new Error(tab.error));
-    }
-    const runKey = `${base.latest.runNumber}-${base.previous.runNumber}`;
-    if (tab.status === 'ready' && tab.key === runKey && tab.data) {
-      return Promise.resolve(tab.data);
-    }
-    if (tab.status === 'loading' && tab.promise) {
-      return tab.promise;
-    }
-    const controller = new AbortController();
-    tab.controller = controller;
-    tab.status = 'loading';
-    tab.error = '';
-    const promise = loadProgressInsightsDetails(base, { signal: controller.signal })
-      .then(result => {
-        tab.data = result;
-        tab.key = runKey;
-        tab.status = 'ready';
-        tab.error = '';
-        return result;
-      })
-      .catch(err => {
-        if (controller.signal.aborted) {
-          tab.status = 'idle';
-        } else {
-          tab.status = 'error';
-          tab.error = err?.message || 'Unable to load progress insights.';
-        }
-        throw err;
-      })
-      .finally(() => {
-        if (tab.controller === controller) {
-          tab.controller = null;
-        }
-        tab.promise = null;
-        if (scanInsightsState.activeTab === 'progress') {
-          renderScanInsightsTabContent('progress');
-        }
-      });
-    tab.promise = promise;
-    if (scanInsightsState.activeTab === 'progress') {
-      renderScanInsightsTabContent('progress');
-    }
-    return promise;
-  }
-
   function ensureCoverageInsightsDetails() {
     const base = scanInsightsState.data;
     const tab = getScanInsightsTabState('coverage');
@@ -2686,32 +2616,6 @@
     };
   }
 
-  async function loadProgressInsightsDetails(baseData, { signal } = {}) {
-    const scanId = baseData?.scanId;
-    const latestRunNumber = baseData?.latest?.runNumber;
-    const previousRunNumber = baseData?.previous?.runNumber;
-    if (!scanId || latestRunNumber == null || previousRunNumber == null) {
-      throw new Error('Missing run metadata for progress insights.');
-    }
-    const [latestIssues, previousIssues] = await Promise.all([
-      fetchRunIssuesForInsights(scanId, latestRunNumber, { signal }),
-      fetchRunIssuesForInsights(scanId, previousRunNumber, { signal })
-    ]);
-    const diff = diffIssueCollections(latestIssues.records, previousIssues.records);
-    return {
-      runKey: `${latestRunNumber}-${previousRunNumber}`,
-      latestRunNumber,
-      previousRunNumber,
-      comparedIssues: {
-        latest: latestIssues.records.length,
-        previous: previousIssues.records.length,
-        truncatedLatest: latestIssues.truncated,
-        truncatedPrevious: previousIssues.truncated
-      },
-      diff
-    };
-  }
-
   async function loadCoverageInsightsDetails(baseData, { signal } = {}) {
     const scanId = baseData?.scanId;
     const latestRunNumber = baseData?.latest?.runNumber;
@@ -2795,19 +2699,6 @@
       durationSeconds,
       raw: run
     };
-  }
-
-  async function fetchRunIssuesForInsights(scanId, runNumber, { limit = scanInsightsIssueLimit, signal } = {}) {
-    return fetchRunResourceCollection({
-      scanId,
-      runNumber,
-      resource: 'issues',
-      limit,
-      pageSize: scanInsightsIssuePageSize,
-      signal,
-      mapItems: getIssuesArrayFromPayload,
-      mapRecord: mapRunIssueRecord
-    });
   }
 
   async function fetchRunPagesForInsights(scanId, runNumber, { limit = scanInsightsPageLimit, signal } = {}) {
@@ -3271,188 +3162,6 @@
     if (changed && scanInsightsState.status === 'ready') {
       renderScanInsightsTabContent(scanInsightsState.activeTab);
     }
-  }
-
-  function mapRunIssueRecord(record) {
-    if (!record || typeof record !== 'object') return null;
-    const pick = (...keys) => {
-      for (const key of keys) {
-        if (record[key] != null) return record[key];
-      }
-      return null;
-    };
-    const ruleId = pick('ruleId','ruleID','rule','axeRuleId','axeRuleID','id');
-    const description = pick('ruleSummary','summary','description','title','help','message') || ruleId || 'Issue';
-    const impact = normalizeImpactLabel(pick('impact','severity','priority','issueImpact','issueSeverity','level'));
-    const pageUrl =
-      pick('pageUrl','url','targetPage','pageUri','page','location','href','issueUrl') || '';
-    const pageTitle = pick('pageTitle','title','pageName','name') || '';
-    const target = pick('target','selector','element','cssSelector','xpath','nodeTarget','snippet');
-    const status = pick('status','issueStatus','state') || '';
-    const nodeCount = coerceNumber(pick('elementCount','nodeCount','occurrenceCount','instances','count'), 1) || 1;
-    const fingerprint = buildIssueFingerprint({ ruleId, description, pageUrl, target });
-    return {
-      id: pick('id','issueId','uid','issueKey') || fingerprint,
-      ruleId: ruleId || description,
-      description,
-      impact,
-      pageUrl,
-      pageTitle,
-      target,
-      nodeCount,
-      status,
-      fingerprint
-    };
-  }
-
-  function normalizeImpactLabel(value) {
-    const text = String(value || '').toLowerCase();
-    if (!text) return 'unknown';
-    if (text.includes('critical') || text.includes('impact3') || text.includes('high')) return 'critical';
-    if (text.includes('serious') || text.includes('impact2') || text.includes('mediumhigh')) return 'serious';
-    if (text.includes('moderate') || text.includes('impact1') || text.includes('medium')) return 'moderate';
-    if (text.includes('minor') || text.includes('impact0') || text.includes('low')) return 'minor';
-    if (text.includes('review')) return 'needsReview';
-    return text;
-  }
-
-  function buildIssueFingerprint(parts) {
-    const norm = value => normalizeKeyFragment(value || '');
-    const segments = [norm(parts?.ruleId || parts?.description), norm(parts?.pageUrl), norm(parts?.target)];
-    const key = segments.filter(Boolean).join('|');
-    if (key) return key;
-    return norm(parts?.ruleId || parts?.description || parts?.pageUrl || parts?.target || Math.random());
-  }
-
-  function diffIssueCollections(latestIssues, previousIssues) {
-    const prevMap = new Map();
-    const latestMap = new Map();
-    const newIssues = [];
-    const resolvedIssues = [];
-    (previousIssues || []).forEach(issue => {
-      if (!issue || !issue.fingerprint) return;
-      prevMap.set(issue.fingerprint, issue);
-    });
-    (latestIssues || []).forEach(issue => {
-      if (!issue || !issue.fingerprint) return;
-      latestMap.set(issue.fingerprint, issue);
-      if (!prevMap.has(issue.fingerprint)) {
-        newIssues.push(issue);
-      }
-    });
-    (previousIssues || []).forEach(issue => {
-      if (!issue || !issue.fingerprint) return;
-      if (!latestMap.has(issue.fingerprint)) {
-        resolvedIssues.push(issue);
-      }
-    });
-    const summaryByImpact = summarizeIssuesByImpact(newIssues, resolvedIssues);
-    const aggregatesByRule = buildIssueAggregateEntries(newIssues, resolvedIssues, { mode: 'rule' });
-    const aggregatesByPage = buildIssueAggregateEntries(newIssues, resolvedIssues, { mode: 'page' });
-    return {
-      newIssues,
-      resolvedIssues,
-      summaryByImpact,
-      totals: {
-        newCount: newIssues.length,
-        resolvedCount: resolvedIssues.length,
-        net: newIssues.length - resolvedIssues.length
-      },
-      ruleRegressions: aggregatesByRule.regressions,
-      ruleRemediations: aggregatesByRule.remediations,
-      pageRegressions: aggregatesByPage.regressions,
-      pageImprovements: aggregatesByPage.remediations
-    };
-  }
-
-  function summarizeIssuesByImpact(newIssues, resolvedIssues) {
-    const impacts = ['critical','serious','moderate','minor','needsReview'];
-    const summary = {};
-    impacts.forEach(impact => {
-      summary[impact] = { impact, newCount: 0, resolvedCount: 0, net: 0, weight: scanInsightsIssueWeights[impact] || 1 };
-    });
-    newIssues.forEach(issue => {
-      const key = impacts.includes(issue.impact) ? issue.impact : 'minor';
-      summary[key].newCount += 1;
-    });
-    resolvedIssues.forEach(issue => {
-      const key = impacts.includes(issue.impact) ? issue.impact : 'minor';
-      summary[key].resolvedCount += 1;
-    });
-    Object.values(summary).forEach(entry => {
-      entry.net = entry.newCount - entry.resolvedCount;
-    });
-    return summary;
-  }
-
-  function buildIssueAggregateEntries(newIssues, resolvedIssues, { mode } = {}) {
-    const map = new Map();
-    const makeEntry = issue => {
-      if (mode === 'page') {
-        return {
-          key: buildIssueFingerprint({ ruleId: issue.pageUrl || issue.pageTitle, pageUrl: issue.pageUrl, target: issue.target }),
-          type: 'page',
-          pageUrl: issue.pageUrl || '',
-          pageTitle: issue.pageTitle || issue.pageUrl || 'Untitled page',
-          newCount: 0,
-          resolvedCount: 0,
-          delta: 0
-        };
-      }
-      return {
-        key: `${normalizeKeyFragment(issue.ruleId || issue.description)}|${issue.impact || 'unknown'}`,
-        type: 'rule',
-        ruleId: issue.ruleId || issue.description || 'Rule',
-        ruleSummary: issue.description || issue.ruleId || 'Rule',
-        impact: issue.impact || 'unknown',
-        pages: new Set(),
-        newCount: 0,
-        resolvedCount: 0,
-        delta: 0
-      };
-    };
-    const getKey = issue => {
-      if (!issue) return null;
-      if (mode === 'page') {
-        return normalizeKeyFragment(issue.pageUrl || issue.pageTitle || issue.target || issue.ruleId);
-      }
-      return `${normalizeKeyFragment(issue.ruleId || issue.description)}|${issue.impact || 'unknown'}`;
-    };
-    const adjust = (issue, field) => {
-      const key = getKey(issue);
-      if (!key) return;
-      let entry = map.get(key);
-      if (!entry) {
-        entry = makeEntry(issue);
-        map.set(key, entry);
-      }
-      entry[field] += 1;
-      entry.delta = entry.newCount - entry.resolvedCount;
-      if (entry.pages instanceof Set && issue.pageUrl) {
-        entry.pages.add(issue.pageUrl);
-      }
-    };
-    newIssues.forEach(issue => adjust(issue, 'newCount'));
-    resolvedIssues.forEach(issue => adjust(issue, 'resolvedCount'));
-    const formatEntry = entry => {
-      if (entry.pages instanceof Set) {
-        entry.pageSamples = Array.from(entry.pages).slice(0, 4);
-      }
-      delete entry.pages;
-      return entry;
-    };
-    const regressions = [];
-    const remediations = [];
-    map.forEach(entry => {
-      if (entry.delta > 0) {
-        regressions.push(formatEntry(entry));
-      } else if (entry.delta < 0) {
-        remediations.push(formatEntry(entry));
-      }
-    });
-    regressions.sort((a, b) => b.delta - a.delta || b.newCount - a.newCount);
-    remediations.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta) || b.resolvedCount - a.resolvedCount);
-    return { regressions, remediations };
   }
 
   function mapRunPageRecord(record) {
@@ -4932,7 +4641,7 @@
       padding-top: 0.5rem;
       border-top: 1px solid rgba(15,23,42,0.08);
     }
-    .a11y-scan-insights-section h3 {
+    .a11y-scan-insights-section h2 {
       margin: 0 0 0.75rem;
       font-size: 1rem;
       color: #0f172a;
@@ -4946,6 +4655,13 @@
     }
     .a11y-scan-insights-summary-grid {
       grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .a11y-scan-insights-summary-grid > li,
+    .a11y-scan-insights-impact-item {
+      list-style: none;
     }
     .a11y-scan-insights-impact-card {
       position: relative;
@@ -5322,9 +5038,9 @@
     }
     .a11y-scan-insights-line {
       display: grid;
-      grid-template-columns: auto minmax(280px, 1fr);
+      grid-template-columns: minmax(280px, 1fr);
       gap: 0.75rem 1rem;
-      align-items: end;
+      align-items: start;
       overflow-x: auto;
     }
     .a11y-scan-insights-line-chart {
@@ -5338,24 +5054,9 @@
       height: 250px;
       box-sizing: border-box;
     }
-    .a11y-scan-insights-axis-labels {
-      grid-column: 1 / 2;
-      grid-row: 1 / 2;
-      display: flex;
-      flex-direction: column;
-      gap: 0.35rem;
-      justify-content: center;
-      font-size: 0.85rem;
-      color: #475569;
-    }
     .a11y-scan-insights-line-chart {
-      grid-column: 2 / 3;
+      grid-column: 1 / -1;
       grid-row: 1 / 2;
-    }
-    .a11y-scan-insights-axis-label.is-y-axis {
-      writing-mode: vertical-rl;
-      transform: rotate(180deg);
-      text-align: center;
     }
     .a11y-scan-insights-line-legend {
       grid-column: 1 / -1;
@@ -5416,33 +5117,6 @@
       font-variant-numeric: tabular-nums;
       color: #0f172a;
       font-weight: 600;
-    }
-    .a11y-scan-insights-axis-labels {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-end;
-      gap: 0.5rem;
-      font-size: 0.78rem;
-      color: #475569;
-      margin-top: -0.35rem;
-      padding: 0 0.4rem 0.2rem;
-    }
-    .a11y-scan-insights-axis-label {
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      font-weight: 600;
-    }
-    .a11y-scan-insights-axis-label.is-y-axis {
-      writing-mode: vertical-lr;
-      transform: rotate(180deg);
-      min-height: 120px;
-      align-self: stretch;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .a11y-scan-insights-axis-label.is-x-axis {
-      margin-left: auto;
     }
     .a11y-scan-insights-stack-wrapper {
       display: flex;
@@ -13929,7 +13603,7 @@
       panel.setAttribute('role','tabpanel');
       panel.setAttribute('aria-labelledby', tabId);
       panel.dataset.tabKey = tab.key;
-      panel.tabIndex = -1;
+      panel.tabIndex = 0;
       if (!isSelected) {
         panel.hidden = true;
       } else {
@@ -18437,10 +18111,10 @@
     const isQuickActionsDialog = !isScansDialog && !isScanInsightsDialog;
     logWidget('openModal requested', { dialogMode, isScansDialog, isScanInsightsDialog });
     const minimizeAriaLabel = isScansDialog
-      ? 'Hide scan summary dialog'
+      ? 'Minimize scan summary dialog'
       : isScanInsightsDialog
-        ? 'Hide scan insights dialog'
-        : 'Hide quick actions dialog';
+        ? 'Minimize scan insights dialog'
+        : 'Minimize quick actions dialog';
     const restoreLabel = isScansDialog
       ? 'Show scan summary'
       : isScanInsightsDialog
@@ -18535,6 +18209,9 @@
         filterBtn.setAttribute('aria-disabled','true');
         filterBtn.disabled = true;
         filterBtn.title = 'Filters are not available on Scan insights.';
+        filterBtn.classList.add('is-disabled');
+        filterBtn.style.opacity = '0.4';
+        filterBtn.style.cursor = 'not-allowed';
         scanInsightsState.filterButton = filterBtn;
       } else {
         filterBtn.setAttribute('aria-label','Filters (0)');
@@ -18602,7 +18279,7 @@
     settingsBtn.type = 'button';
     settingsBtn.className = 'a11y-scan-report-settings';
     settingsBtn.textContent = 'Settings';
-    settingsBtn.setAttribute('aria-label','Open settings dialog');
+  settingsBtn.setAttribute('aria-label','Settings');
 
     settingsBtn.addEventListener('click', () => {
       openSettingsDialog().catch(err => {
