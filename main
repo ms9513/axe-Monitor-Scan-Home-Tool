@@ -1,4 +1,5 @@
 (function () {
+  // Core widget state and configuration that remain stable for the lifespan of the injected script.
   const isDequeHost = location.hostname.endsWith('dequecloud.com');
   const scanInsightsTabs = [
     { key: 'scoreTrend', label: 'Score Trend' },
@@ -8,6 +9,7 @@
   const scanInsightsPageLimit = 400;
   const scanInsightsPagePageSize = 100;
   const enablePageSummaryApiForMetrics = false;
+  // Central state bag shared across all Scan Insights interactions (tab cache, dialog refs, etc.).
   const scanInsightsState = {
     context: null,
     trigger: null,
@@ -34,6 +36,7 @@
     pagesWithIssues: new Map()
   };
 
+  // Creates an empty cache entry for each tab so we can hydrate lazily without re-allocating structures.
   function createScanInsightsTabCache() {
     return {
       progress: createScanInsightsTabState(),
@@ -41,6 +44,7 @@
     };
   }
 
+  // Lightweight debug logger that safely degrades when console APIs are unavailable.
   function logScanInsightsDebug(message, details) {
     if (typeof console !== 'object') return;
     const logger = console.debug || console.log;
@@ -68,6 +72,7 @@
     return null;
   }
 
+  // Track the most recent "pages with issues" value per run so later calculations can diff reliably.
   function logPagesWithIssuesResolution(run, source, value, context = {}) {
     const key = getRunDebugKey(run);
     const payload = {
@@ -528,6 +533,7 @@
     target.appendChild(buildWeightedDensitySection(recentRuns));
   }
 
+  // Builds the "Progress & remediation" tab which compares the latest three runs.
   function renderScanInsightsProgressTab(target, data) {
     if (!data?.previous) {
       const msg = document.createElement('p');
@@ -541,6 +547,7 @@
     target.appendChild(buildScanInsightsSection('Run-over-run comparison', table));
   }
 
+  // Builds the "Coverage" tab which combines snapshot stats with deeper page-level drilldowns.
   function renderScanInsightsCoverageTab(target, data) {
     const latest = data?.latest;
     if (!latest) {
@@ -574,6 +581,7 @@
     target.appendChild(buildCleanPagesSection(tab.data));
   }
 
+  // Entry point for Score Trend tab rendering; orchestrates KPI, chart, and table sections.
   function renderScanInsightsScoreTrendTab(target, data) {
     const baseRuns = Array.isArray(data?.runs) && data.runs.length ? data.runs : data?.completedRuns || [];
     const sortedRuns = sortRunsByCompletedAtAscending(baseRuns.filter(run => run && isRunCompleted(run)));
@@ -588,6 +596,7 @@
     target.appendChild(buildScoreTrendTableSection(sortedRuns, newestRun));
   }
 
+  // Creates the KPI summary row that highlights how the latest run compares with the earliest run in view.
   function buildScoreTrendKpiSection(oldestRun, newestRun) {
     const section = document.createElement('section');
     section.className = 'a11y-scan-insights-section';
@@ -639,6 +648,7 @@
     return section;
   }
 
+  // Renders the accessibility score chart + descriptive summary for the Score Trend tab.
   function buildScoreTrendChartSection(runs, oldestRun, newestRun) {
     const section = document.createElement('section');
     section.className = 'a11y-scan-insights-section';
@@ -703,6 +713,7 @@
     return section;
   }
 
+  // Provides the detailed run-by-run table that mirrors the chart ordering for quick CSV export/reference.
   function buildScoreTrendTableSection(runs, newestRun) {
     const captionText = `Completed runs ordered from oldest to newest showing score, issue, and page metrics (${runs.length} total).`;
     const table = buildRunTable(runs, [
@@ -723,6 +734,7 @@
     return buildScanInsightsSection('Run history details', table);
   }
 
+  // Generic section factory that stamps consistent markup (heading + body + download actions) across tabs.
   function buildScanInsightsSection(title, body) {
     const section = document.createElement('section');
     section.className = 'a11y-scan-insights-section';
@@ -743,6 +755,7 @@
     return section;
   }
 
+  // Utility for a consistent muted "note" paragraph treatment.
   function buildScanInsightsNote(text) {
     const note = document.createElement('p');
     note.className = 'a11y-scan-insights-note';
@@ -750,6 +763,7 @@
     return note;
   }
 
+  // Adds CSV download affordances to any tables found within a rendered insights section.
   function attachDownloadControls(section, sectionTitle = '') {
     if (!section) return;
     const resolvedTitle = sectionTitle || section.querySelector('h3')?.textContent || 'scan insights';
@@ -760,6 +774,8 @@
     });
   }
 
+  // Wraps a table with a utility action row so we can insert the download button without
+  // disturbing existing layout/styling.
   function ensureTableDownloadWrapper(table, filename, { sectionTitle, tableIndex } = {}) {
     if (!table || table.closest('.a11y-download-block')) return;
     const parent = table.parentNode;
@@ -776,6 +792,8 @@
     wrapper.appendChild(table);
   }
 
+  // Compose an aria-label that references the visual section title so screen reader users
+  // understand which dataset they are about to export.
   function buildDownloadAriaLabel(sectionTitle, tableIndex) {
     const title = sectionTitle?.trim();
     const suffix = Number.isInteger(tableIndex) ? `table ${tableIndex + 1}` : null;
@@ -788,6 +806,7 @@
     return 'Download scan insight table as CSV';
   }
 
+  // Shared button factory that wraps download logic with basic error handling.
   function createDownloadButton(label, onClick, { ariaLabel } = {}) {
     const button = document.createElement('button');
     button.type = 'button';
@@ -805,6 +824,7 @@
     return button;
   }
 
+  // Serializes any metrics table into a CSV blob while preserving the scan label context.
   function downloadTableAsCsv(table, filename = 'table.csv') {
     if (!table) return;
     const rows = Array.from(table.rows || []);
@@ -883,6 +903,7 @@
     return `${safeName}.${extension}`;
   }
 
+  // Summarizes high-level counts (sampled, with/without issues, etc.) for the coverage tab.
   function buildPageHealthSummarySection(stats) {
     if (!stats) {
       return buildScanInsightsSection('Page health snapshot', buildScanInsightsNote('Page-level data is still loading.'));
@@ -924,6 +945,7 @@
     return buildScanInsightsSection('Page health snapshot', grid);
   }
 
+  // Lists the highest-impact pages (critical/serious counts) for the selected run.
   function buildTopPagesSection(coverageData) {
     const stats = coverageData?.stats;
     if (!stats?.topPages?.length) {
@@ -980,6 +1002,7 @@
     return buildScanInsightsSection('Top impacted pages', body);
   }
 
+  // Highlights pages that currently have zero open issues so users can celebrate wins.
   function buildCleanPagesSection(coverageData) {
     const stats = coverageData?.stats;
     const cleanPages = stats?.cleanPages || [];
@@ -1005,22 +1028,26 @@
     });
     return buildScanInsightsSection('Pages without open issues', list);
   }
+  // Returns the newest "limit" runs from the Monitor API payload (already sorted descending).
   function sliceRecentRuns(runs, limit = 3) {
     if (!Array.isArray(runs) || !runs.length) return [];
     return runs.slice(0, Math.max(1, limit));
   }
 
+  // Helper that reverses run ordering so graphs read oldest→newest from left to right.
   function getChronologicalRuns(runs) {
     if (!Array.isArray(runs)) return [];
     return runs.slice().reverse();
   }
 
+  // Ensures computed ratios stay within [0,100] before rendering.
   function clampPercent(value) {
     const num = Number(value);
     if (!Number.isFinite(num)) return null;
     return Math.min(100, Math.max(0, num));
   }
 
+  // Standardizes how charts are annotated (figure/figcaption, ids, optional title).
   function wrapChartWithFigure(content, { caption, labelId, title } = {}) {
     const figure = document.createElement('figure');
     figure.className = 'a11y-scan-insights-figure';
@@ -1045,6 +1072,7 @@
     return figure;
   }
 
+  // Sorts completed runs chronologically so trend math is deterministic.
   function sortRunsByCompletedAtAscending(runs) {
     if (!Array.isArray(runs)) return [];
     return runs
@@ -1053,6 +1081,7 @@
       .sort(compareRunsByCompletedAtAsc);
   }
 
+  // Comparison function used by sortRunsByCompletedAtAscending; prefers real timestamps over run #.
   function compareRunsByCompletedAtAsc(a, b) {
     const aTime = a?.completedAt instanceof Date ? a.completedAt.getTime() : Number.POSITIVE_INFINITY;
     const bTime = b?.completedAt instanceof Date ? b.completedAt.getTime() : Number.POSITIVE_INFINITY;
@@ -1066,6 +1095,7 @@
     return aRun - bRun;
   }
 
+  // Normalizes run.score values (0-1 or 0-100) into a bounded percentage.
   function getScorePercent(run) {
     if (!run) return null;
     const value = coerceNumber(run?.score, Number.NaN);
@@ -1074,6 +1104,7 @@
     return Math.min(100, Math.max(0, scaled));
   }
 
+  // Attempts multiple fallbacks to derive "pages with issues" from whichever Monitor fields are available.
   function calculatePagesWithIssues(run) {
     const summaryValue = coerceNumber(run?.pageIssueSummary?.completedWithIssues, Number.NaN);
     if (Number.isFinite(summaryValue)) {
@@ -1141,6 +1172,7 @@
     return null;
   }
 
+  // Human-readable delta text used inside impact cards (handles missing data + different units).
   function createScoreTrendChangeSummary(current, previous, { preferLower = false, changeFormatter, valueFormatter } = {}) {
     const formatValue = typeof valueFormatter === 'function' ? valueFormatter : formatNumberValue;
     if (!Number.isFinite(current) || !Number.isFinite(previous)) {
@@ -1163,10 +1195,12 @@
     return `${changeText} ${direction} • previously ${formatValue(previous)}`;
   }
 
+  // Tiny helper to avoid ID collisions when duplicating sections dynamically.
   function createUniqueId(prefix = 'id') {
     return `${prefix}-${Math.random().toString(36).slice(2, 9)}`;
   }
 
+  // Combines the stacked impact visualization with a supporting table for recent runs.
   function buildIssuesImpactSection(runs) {
     const chronologicalRuns = getChronologicalRuns(runs);
     const currentRunNumber = runs?.[0]?.runNumber ?? null;
@@ -1199,6 +1233,7 @@
     return buildScanInsightsSection('Issues by impact across runs', [chartFigure, table]);
   }
 
+  // Visualizes the severity-weighted density metric (score per page) with chart, math explainer, and table.
   function buildWeightedDensitySection(runs) {
     const chronologicalRuns = getChronologicalRuns(runs);
     const currentRunNumber = runs?.[0]?.runNumber ?? null;
@@ -1298,6 +1333,7 @@
     return buildScanInsightsSection('Severity-weighted issue density', [chartFigure, explanation, table]);
   }
 
+  // Compares the latest run's high-impact issue count against an older baseline run.
   function buildHighImpactDeltaSection(latest, oldest) {
     if (!latest || !oldest || latest?.runNumber === oldest?.runNumber) {
       const msg = document.createElement('p');
@@ -1333,6 +1369,7 @@
     return buildScanInsightsSection('High-impact issues vs last runs', card);
   }
 
+  // Projects arbitrary run data into an ordered array suitable for trend charts/legends.
   function buildChronologicalPoints(runs, mapper, { currentRunNumber } = {}) {
     if (!Array.isArray(runs)) return [];
     const chronological = runs.slice().reverse();
@@ -1348,6 +1385,7 @@
       .filter(point => point && point.value != null);
   }
 
+  // Lightweight SVG line chart tailored for a11y scan insights (non-library to avoid inject conflicts).
   function createLineChart(points, {
     yMin = null,
     yMax = null,
@@ -1441,6 +1479,7 @@
     return wrapper;
   }
 
+  // Ordered list that mirrors chart points so screen readers get the same insight.
   function createLegendList(points, valueFormatter = formatNumberValue) {
     const legend = document.createElement('ol');
     legend.className = 'a11y-scan-insights-line-legend';
@@ -1488,6 +1527,7 @@
     return legend;
   }
 
+  // Stacked bars showing issue counts by severity for each run.
   function createStackedImpactChart(runs, { highlightRunNumber } = {}) {
     if (!runs || !runs.length) {
       return buildScanInsightsPreface('health');
@@ -1561,6 +1601,7 @@
     return wrapper;
   }
 
+  // Generic tabular renderer shared by multiple sections (score trend, density, impact, etc.).
   function buildRunTable(runs, columns, { caption, highlightRunNumber } = {}) {
     const table = document.createElement('table');
     table.className = 'a11y-scan-insights-table';
@@ -1610,12 +1651,14 @@
     return table;
   }
 
+  // Returns Critical + Serious counts, used for deltas and stacked badges.
   function calculateHighImpactCount(run) {
     const crit = Math.max(0, Number(run?.issueCounts?.critical) || 0);
     const serious = Math.max(0, Number(run?.issueCounts?.serious) || 0);
     return crit + serious;
   }
 
+  // Weighted issue score (crit=5, serious=3, moderate=1) used in density calculations.
   function calculateWeightedScore(run) {
     const crit = Math.max(0, Number(run?.issueCounts?.critical) || 0);
     const serious = Math.max(0, Number(run?.issueCounts?.serious) || 0);
@@ -1623,6 +1666,7 @@
     return 5 * crit + 3 * serious + moderate;
   }
 
+  // Weighted score divided by completed pages, normalized per run.
   function calculateWeightedDensity(run) {
     const weightedScore = calculateWeightedScore(run);
     const completedPages = getCompletedPageCount(run);
@@ -1631,6 +1675,7 @@
     return Number.isFinite(density) ? density : null;
   }
 
+  // Fallback cascade for reading "pages scanned" regardless of which Monitor fields are available.
   function getCompletedPageCount(run) {
     if (!run) return null;
     const summary = run.pageIssueSummary || null;
@@ -1644,15 +1689,18 @@
     return Number.isFinite(value) ? value : null;
   }
 
+  // Formats decimal ratios as strings while tolerating nulls.
   function formatPercent(value, fractionDigits = 1) {
     if (!Number.isFinite(value)) return '—';
     return (value * 100).toFixed(fractionDigits) + '%';
   }
 
+  // Human-friendly label for run rows/charts.
   function formatRunLabel(run) {
     return run?.runNumber != null ? `Run #${run.runNumber}` : 'Run —';
   }
 
+  // Creates the comparison table shown in the Progress tab (latest vs previous runs).
   function buildDeltaTable(latest, previous, secondPrevious) {
     const rows = [
       {
@@ -1784,6 +1832,7 @@
     return table;
   }
 
+  // Small card grid summarizing counts from the latest run payload.
   function buildCoverageGrid(latest) {
     const grid = document.createElement('div');
     grid.className = 'a11y-scan-insights-coverage-grid';
@@ -1805,6 +1854,7 @@
     return grid;
   }
 
+  // Definition list summarizing metadata details for the selected run.
   function buildRunMetaList(latest) {
     const list = document.createElement('dl');
     list.className = 'a11y-scan-insights-meta-list';
@@ -1828,6 +1878,7 @@
     return list;
   }
 
+  // Converts numeric delta into {impact, arrow} for card styling.
   function deriveImpactMeta(current, previous, preferLower = false) {
     if (!Number.isFinite(current) || !Number.isFinite(previous) || current === previous) {
       return { impact: 'neutral', arrow: 'flat', delta: 0 };
@@ -1839,6 +1890,7 @@
     return { impact, arrow, delta };
   }
 
+  // Inline SVG arrow used inside impact cards (avoids external assets).
   function createImpactArrowIcon(direction) {
     const paths = {
       up: 'M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z',
@@ -1861,6 +1913,7 @@
     return svg;
   }
 
+  // Renders a metric card with value, delta narrative, icon, and styling.
   function createImpactSummaryCard(definition) {
     const {
       label,
@@ -1900,6 +1953,7 @@
     return card;
   }
 
+  // Generic metric card used across dashboards.
   function createMetricCard({ label, value, hint, delta, intent, description }) {
     const card = document.createElement('div');
     card.className = `a11y-scan-insights-card${intent ? ` is-${intent}` : ''}`;
@@ -1930,6 +1984,7 @@
     return card;
   }
 
+  // Pill-shaped delta indicator reused in tables/cards.
   function createDeltaBadge(current, previous, { preferLower = false, fractionDigits = 0, suffix = '', showDirectionText = false } = {}) {
     if (current == null || previous == null) return null;
     const delta = current - previous;
@@ -1956,6 +2011,7 @@
     return badge;
   }
 
+  // Helper for +/-N formatting with localized thousands separators.
   function formatSignedValue(value, fractionDigits = 0) {
     const abs = Math.abs(value);
     const text = Number.isFinite(abs)
@@ -1967,16 +2023,22 @@
     return `${value > 0 ? '+' : '-'}${text}`;
   }
 
+  // Converts any numeric-ish value into a localized integer string
+  // while preserving em dash fallback for nullish inputs.
   function formatNumberValue(value) {
     if (value == null || Number.isNaN(value)) return '—';
     return Number(value).toLocaleString();
   }
 
+  // Formats percentages with a single decimal place and %,
+  // gracefully returning the em dash placeholder when needed.
   function formatScoreValue(value) {
     if (value == null || Number.isNaN(value)) return '—';
     return `${Number(value).toFixed(1)}%`;
   }
 
+  // Converts raw seconds into a friendly duration label (s/m/h), keeping
+  // the output compact for UI badges.
   function formatDuration(seconds) {
     if (!Number.isFinite(seconds) || seconds <= 0) return '—';
     if (seconds < 60) return `${Math.round(seconds)}s`;
@@ -1990,6 +2052,7 @@
     return mins ? `${hours}h ${mins}m` : `${hours}h`;
   }
 
+  // Shared formatter for axis labels / tooltips that need both date and time.
   function formatDateTimeLabel(date) {
     if (!(date instanceof Date)) return '';
     try {
@@ -2005,6 +2068,7 @@
     }
   }
 
+  // Simpler date-only formatter used for table cells / fallback text.
   function formatDateOnlyLabel(date) {
     if (!(date instanceof Date)) return '';
     try {
@@ -2018,6 +2082,7 @@
     }
   }
 
+  // Lightweight helper for sentence-casing metric labels from raw keys.
   function capitalizeFirstLetter(text) {
     if (!text) return '';
     return text.charAt(0).toUpperCase() + text.slice(1);
@@ -2028,6 +2093,9 @@
     ? new URLSearchParams(location.search || '').get('scanRun')
     : null;
 
+  // Builds the modal that lists currently running scans pulled from
+  // whatever context invoked the action (pages, scans, issues). The dialog
+  // mirrors the Monitor styling, wires up focus trapping, and allows data export.
   function openRunsInProgressDialog(contextLabel, runs, onClose) {
     if (!runs || !runs.length) return;
 
@@ -2151,12 +2219,16 @@
   const existingRoot = document.querySelector('.a11y-scan-report-root');
   if (existingRoot) existingRoot.remove();
 
+  // Entry point for scan detail pages: prime the state object with the current
+  // scan context, clear stale data, and ensure the trigger button exists.
   function initScanDetailInsights(context) {
     scanInsightsState.context = context;
     resetScanInsightsData();
     ensureScanInsightsTrigger();
   }
 
+  // Lazily injects or refreshes the "Scan insights" button.
+  // The button doubles as the anchoring element for dialog focus restore.
   function ensureScanInsightsTrigger() {
     if (!root) return;
     const existing = scanInsightsState.trigger;
@@ -2182,6 +2254,8 @@
     scanInsightsState.trigger = button;
   }
 
+  // Updates the dialog subtitle whenever context shifts (e.g., switching scans)
+  // so users understand which scan/run the snapshot reflects.
   function updateScanInsightsSubtitle() {
     if (!scanInsightsState.subtitleEl) return;
     const { scanId, runNumber } = scanInsightsState.context || {};
@@ -2212,6 +2286,8 @@
     }
   }
 
+  // Constructs the tabbed dialog layout (tablist + panels + footer controls)
+  // and kicks off the initial data fetch for whichever tab is active.
   function renderScanInsightsDialog(body, footer) {
     body.innerHTML = '';
     footer.innerHTML = '';
@@ -2229,7 +2305,9 @@
     panelsWrap.className = 'a11y-tabpanels a11y-scan-insights-panels';
     body.appendChild(panelsWrap);
 
-    const handleTabKeydown = (event, index) => {
+  // Roving tabindex pattern so arrow keys cycle between tabs without
+  // reinventing button semantics.
+  const handleTabKeydown = (event, index) => {
       const { key } = event;
       if (!scanInsightsState.tabButtons.length) return;
       const maxIndex = scanInsightsState.tabButtons.length - 1;
@@ -2298,7 +2376,8 @@
       }
     });
 
-    const refreshBtn = document.createElement('button');
+  // Manual refresh lets users bust caches without closing the dialog.
+  const refreshBtn = document.createElement('button');
     refreshBtn.type = 'button';
     refreshBtn.className = 'Button Button--secondary Button--thin a11y-scan-insights-refresh-btn';
     refreshBtn.textContent = 'Refresh data';
@@ -2311,6 +2390,7 @@
     ensureScanInsightsData().catch(err => console.warn('Scan insights load failed', err));
   }
 
+  // Clears dialog bookkeeping so subsequent openings start fresh.
   function cleanupScanInsightsDialog() {
     cancelScanInsightsFetch({ dropData: false });
     scanInsightsState.panels = new Map();
@@ -2320,6 +2400,8 @@
     scanInsightsState.dialog = null;
   }
 
+  // Central tab switcher so keyboard/mouse paths go through the same logic,
+  // updating aria attributes, showing the relevant panel, and refreshing data.
   function switchScanInsightsTab(tabKey) {
     if (!tabKey || scanInsightsState.activeTab === tabKey) return;
     scanInsightsState.activeTab = tabKey;
@@ -2339,6 +2421,8 @@
     ensureScanInsightsData().catch(err => console.warn('Scan insights tab load issue', err));
   }
 
+  // Responsible for rendering the visible panel based on load state. This keeps
+  // skeletons/errors consistent across tabs and allows targeted rerenders.
   function renderScanInsightsTabContent(tabKey, overrideTarget) {
     const target = overrideTarget || scanInsightsState.panels.get(tabKey);
     if (!target) return;
@@ -2368,6 +2452,8 @@
     }
   }
 
+  // Builds the minimal context object used throughout insights requests,
+  // deriving run metadata directly from the page when possible.
   function getScanDetailContext(scanIdFromPath) {
     const scanId = coerceNumber(scanIdFromPath, null);
     if (scanId == null) return null;
@@ -2378,6 +2464,8 @@
     };
   }
 
+  // Scrapes the UI/query params for the currently selected run number so
+  // follow-up API calls stay aligned with what the user is viewing.
   function detectActiveRunNumber() {
     const params = new URLSearchParams(location.search || '');
     const paramKeys = ['runNumber','scanRun','run'];
@@ -2408,12 +2496,16 @@
     return null;
   }
 
+  // Drop pending requests and clear the per-tab caches; used whenever context
+  // changes or the dialog is reopened to avoid stale state bleeding through.
   function resetScanInsightsData() {
     cancelScanInsightsFetch({ dropData: true });
     scanInsightsState.error = '';
     scanInsightsState.tabCache = createScanInsightsTabCache();
   }
 
+  // Centralized abort helper that cancels any outstanding fetches (main data,
+  // per-tab requests, and page count enrichments). Optionally wipes cached data.
   function cancelScanInsightsFetch({ dropData = false } = {}) {
     if (scanInsightsState.abortController) {
       try {
@@ -2460,6 +2552,8 @@
     }
   }
 
+  // Loads the base run data for the dialog, reusing in-flight promises to
+  // avoid duplicate requests and wiring AbortController lifecycles.
   function ensureScanInsightsData() {
     const context = scanInsightsState.context;
     if (!context || !context.scanId) {
@@ -2525,6 +2619,8 @@
     return loadPromise;
   }
 
+  // Coverage tab fetch: lazily request page-level stats for the latest run and
+  // memoize by run number so subsequent tab visits stay instant.
   function ensureCoverageInsightsDetails() {
     const base = scanInsightsState.data;
     const tab = getScanInsightsTabState('coverage');
@@ -2577,6 +2673,8 @@
     return promise;
   }
 
+  // Fetches the run list for a scan and distills it down to the subset needed
+  // by the insights UI (latest/previous/oldest and trend series data).
   async function fetchScanInsightsData(context, { signal } = {}) {
     const scanId = context?.scanId;
     if (!scanId) throw new Error('Cannot load insights for an unknown scan.');
@@ -2616,6 +2714,8 @@
     };
   }
 
+  // Pulls the per-page dataset for the coverage view, augments totals via the
+  // page summary cache/API when available, and syncs the run summary.
   async function loadCoverageInsightsDetails(baseData, { signal } = {}) {
     const scanId = baseData?.scanId;
     const latestRunNumber = baseData?.latest?.runNumber;
@@ -2654,6 +2754,7 @@
     };
   }
 
+  // Limits the run history and flips ordering for chart-friendly chronological data.
   function buildTrendSeries(runs, limit = 10) {
     if (!Array.isArray(runs)) return [];
     const slice = runs.slice(0, Math.max(1, limit));
@@ -2669,6 +2770,8 @@
     }));
   }
 
+  // Normalizes raw run payloads into the shape the UI expects, including
+  // derived totals and durations.
   function mapRunForInsights(run) {
     if (!run) return null;
     const runNumber = getRunNumberValue(run);
@@ -2701,6 +2804,8 @@
     };
   }
 
+  // Shorthand for fetching the current run's page list, applying pagination
+  // defaults and mapper functions.
   async function fetchRunPagesForInsights(scanId, runNumber, { limit = scanInsightsPageLimit, signal } = {}) {
     return fetchRunResourceCollection({
       scanId,
@@ -2714,6 +2819,8 @@
     });
   }
 
+  // Generic paginated WAS API fetcher used by multiple resource loaders.
+  // Handles `pageToken` pagination as well as legacy hasNext flags.
   async function fetchRunResourceCollection({
     scanId,
     runNumber,
@@ -2770,21 +2877,26 @@
     return { records, truncated };
   }
 
+  // Ensures cached summaries don't collide between run ids or needs-review scopes.
   function makeRunPageSummaryCacheKey(scanId, runNumber, includeNeedsReview = false) {
     return `${scanId || ''}|${runNumber ?? ''}|${includeNeedsReview ? 'review' : 'open'}`;
   }
 
+  // Look up a previously cached page summary so we avoid hammering the API.
   function getCachedRunPageSummary(scanId, runNumber, includeNeedsReview = false) {
     const key = makeRunPageSummaryCacheKey(scanId, runNumber, includeNeedsReview);
     return runPageSummaryCache.get(key) || null;
   }
 
+  // Persists summary totals per run to share between tabs and future opens.
   function cacheRunPageSummary(scanId, runNumber, summary, includeNeedsReview = false) {
     if (!scanId || runNumber == null || !summary) return;
     const key = makeRunPageSummaryCacheKey(scanId, runNumber, includeNeedsReview);
     runPageSummaryCache.set(key, summary);
   }
 
+  // Aligns the API summary object with the slimmer counting shape expected by
+  // the coverage cards (withIssues/withoutIssues/total).
   function convertRunPageSummaryToCounts(summary) {
     if (!summary) return null;
     const total = summary.completedPages ?? summary.totalPages ?? null;
@@ -2807,6 +2919,8 @@
     };
   }
 
+  // Shallow equality check that tolerates numeric/string mismatches but prevents
+  // unnecessary rerenders when totals don't meaningfully change.
   function areRunPageSummariesEquivalent(previous, next) {
     if (previous === next) return true;
     if (!previous || !next) return false;
@@ -2833,6 +2947,8 @@
     });
   }
 
+  // Applies aggregated page counts onto a run object, preferring larger totals
+  // to avoid regressing previously known coverage numbers.
   function applyRunPageSummary(run, summary, { preferGreaterTotals = true } = {}) {
     if (!run || !summary) return false;
     const existingCounts = run.pageCounts || {};
@@ -2885,6 +3001,8 @@
     return changed;
   }
 
+  // When fresh summary data arrives, mirror it into the cached coverage stats
+  // so the UI reflects the improved counts without another fetch.
   function syncCoverageStatsWithRunSummary(runNumber, summary) {
     if (!summary) return;
     const tab = getScanInsightsTabState('coverage');
@@ -2894,6 +3012,8 @@
     tab.data.stats.runPageCounts = convertRunPageSummaryToCounts(summary);
   }
 
+  // Iterates through every page for a run to build aggregate issue totals.
+  // Retries on rate limiting and caches results for future lookups.
   async function fetchRunPageIssueSummary(scanId, runNumber, { signal, includeNeedsReview = false } = {}) {
     if (!scanId || runNumber == null) return null;
     const cached = getCachedRunPageSummary(scanId, runNumber, includeNeedsReview);
@@ -3017,6 +3137,8 @@
     return summary;
   }
 
+  // Kicks off multiple summary fetches in parallel so historical runs gain
+  // coverage data over time (without blocking the main render).
   async function augmentRunsWithPageIssueCounts(scanId, runs, { signal, includeNeedsReview = false } = {}) {
     if (!scanId || !Array.isArray(runs) || !runs.length) return false;
     const targets = runs.filter(run => run && run.runNumber != null);
@@ -3046,6 +3168,8 @@
     return changed;
   }
 
+  // Ensures we only run one enrichment job at a time and re-render once it
+  // finishes so the UI can pick up the enhanced totals.
   function scheduleRunPageSummaryAugmentation(baseData) {
     if (!enablePageSummaryApiForMetrics) return;
     if (!baseData?.scanId || !Array.isArray(baseData.completedRuns)) return;
@@ -3081,6 +3205,8 @@
     scanInsightsState.pageCountPromise = promise;
   }
 
+  // Fallback path when APIs can’t provide historical counts: briefly cycles
+  // through the existing Monitor run history UI to scrape totals.
   async function scrapeRunHistoryCountsFromUi(baseData, { limit = 3 } = {}) {
     if (!isScanDetailPage) return;
     if (!baseData?.completedRuns?.length) return;
@@ -3164,6 +3290,8 @@
     }
   }
 
+  // Takes the verbose WAS page payload and normalizes it into the lean object
+  // the coverage UI expects (counts, statuses, template flag, etc.).
   function mapRunPageRecord(record) {
     if (!record || typeof record !== 'object') return null;
     const pick = (...keys) => {
@@ -3205,6 +3333,8 @@
     };
   }
 
+  // Aggregates totals/averages used by the coverage cards and leaderboard views,
+  // including healthy counts and template vs standard splits.
   function summarizePageInsights(pages, latestRun) {
     const stats = {
       total: Array.isArray(pages) ? pages.length : 0,
@@ -3257,6 +3387,8 @@
     return stats;
   }
 
+  // Creates a sanitized copy of the last known page counts while backfilling
+  // missing "with/without issues" numbers when the totals allow.
   function buildRunPageCountSnapshot(pageCounts, latestRun) {
     if (!pageCounts && latestRun?.totalPages == null) return null;
     const normalized = {};
@@ -3279,6 +3411,7 @@
     return Object.keys(normalized).length ? normalized : null;
   }
 
+  // Ranks pages by severity-weighted issues so the UI can highlight hotspots.
   function selectTopPagesByIssues(pages, { limit = 8 } = {}) {
     if (!Array.isArray(pages)) return [];
     const sorted = pages.slice().sort((a, b) => {
@@ -3290,11 +3423,13 @@
     return sorted.slice(0, Math.max(1, limit));
   }
 
+  // Quick guard for filtering out in-progress runs before calculating trends.
   function isRunCompleted(run) {
     const status = typeof run?.status === 'string' ? run.status : run?.raw?.status;
     return /complete/i.test(String(status || ''));
   }
 
+  // Given a run object and possible key names, return the first parsable date.
   function pickRunTimestamp(run, keys) {
     for (const key of keys) {
       const value = run?.[key];
@@ -3305,6 +3440,7 @@
     return null;
   }
 
+  // Wrapper around Date.parse that returns null on invalid input instead of NaN.
   function parseInsightDate(value) {
     if (!value) return null;
     const ts = Date.parse(value);
@@ -3312,6 +3448,7 @@
     return null;
   }
 
+  // Computes run duration in seconds, guarding against missing or inverted dates.
   function deriveRunDurationSeconds(startedAt, completedAt) {
     if (!startedAt || !completedAt) return null;
     const diff = (completedAt.getTime() - startedAt.getTime()) / 1000;
@@ -3319,6 +3456,7 @@
     return diff;
   }
 
+  // Scans the various score fields Monitor exposes and clamps to 0–100.
   function getRunScoreValue(run) {
     const candidates = [
       run?.score,
@@ -3336,6 +3474,7 @@
     return null;
   }
 
+  // Normalizes issue counts from the many shapes returned by the API/history export.
   function getRunIssueCounts(run) {
     const issues =
       run?.issues ||
@@ -3361,6 +3500,8 @@
     };
   }
 
+  // Similar to getRunIssueCounts but focused on page-level stats, including
+  // derived totals when the API omits them.
   function getRunPageCounts(run) {
     const pages =
       run?.pages ||
@@ -3413,6 +3554,8 @@
     };
   }
 
+  // Determines the total pages scanned for a run, falling back to sums when
+  // the API doesn't provide an explicit number.
   function deriveRunTotalPages(run, pageCounts) {
     const candidates = [
       run?.totalPages,
@@ -3435,6 +3578,7 @@
     return sum || null;
   }
 
+  // Pulls the unique run identifier from the most reliable field available.
   function getRunNumberValue(run) {
     const candidates = [run?.runNumber, run?.run, run?.id];
     for (const value of candidates) {
@@ -3444,6 +3588,8 @@
     return null;
   }
 
+  // Parses run numbers out of UI nodes (attributes, dataset, or text) so we can
+  // align the dialog state with whatever row the user selected.
   function extractRunNumberFromElement(element) {
     if (!element) return null;
     const attributes = [
@@ -3466,6 +3612,7 @@
     return extractRunNumberFromText(element.textContent);
   }
 
+  // Matches substrings such as "Run 12" or "#4" and returns the numeric value.
   function extractRunNumberFromText(value) {
     if (!value) return null;
     const match = String(value).match(/(?:run|#)?\s*(\d{1,6})/i);
@@ -6112,6 +6259,8 @@
 
   // --- Helpers ---
 
+  // Looks through all tables on the page to find the Monitor grid that lists
+  // scans (by caption or column headers). Used as a base for data extraction.
   function findScansTable() {
     const tables = Array.from(document.querySelectorAll('table'));
     for (const table of tables) {
@@ -6127,6 +6276,8 @@
     return null;
   }
 
+  // Given a list of TH nodes, return the first index whose text starts with the
+  // desired label (case-insensitive). Helpful when Monitor reorders columns.
   function getColIndex(headers, label) {
     const lower = label.toLowerCase();
     return headers.findIndex(th =>
@@ -6134,6 +6285,8 @@
     );
   }
 
+  // Lightweight "parseInt" that tolerates commas and arbitrary text around the
+  // number. Returns 0 when the cell is empty.
   function parseNum(text) {
     if (!text) return 0;
     const cleaned = String(text).replace(/,/g, '');
@@ -6141,6 +6294,8 @@
     return m ? parseInt(m[0], 10) : 0;
   }
 
+  // Converts strings or numbers into a finite Number, defaulting to a fallback
+  // so downstream math stays predictable.
   function coerceNumber(value, fallback = 0) {
     if (typeof value === 'number' && Number.isFinite(value)) return value;
     if (typeof value === 'string' && value.trim()) {
@@ -6150,6 +6305,8 @@
     return fallback;
   }
 
+  // Reads the cached Monitor API key from localStorage (memoized in-memory to
+  // avoid repeated storage hits).
   function getStoredMonitorApiKey() {
     if (cachedMonitorApiKey != null) return cachedMonitorApiKey;
     try {
@@ -6160,6 +6317,8 @@
     return cachedMonitorApiKey;
   }
 
+  // Persists the user's API key and notifies listeners via a custom event so
+  // other widgets can react.
   function setStoredMonitorApiKey(value) {
     cachedMonitorApiKey = (value || '').trim();
     try {
@@ -6182,12 +6341,16 @@
     }
   }
 
+  // Throws when the API key is missing, forcing the caller to route the user to
+  // settings before hitting Monitor endpoints.
   function ensureMonitorApiKey() {
     const key = getStoredMonitorApiKey();
     if (!key) throw new Error('Deque Monitor API key not set.');
     return key;
   }
 
+  // Pulls scan IDs from known URL patterns (full URLs or bare paths) since the
+  // WAS API needs explicit scan IDs.
   function extractScanIdFromUrl(url) {
     if (!url) return null;
     try {
@@ -6201,6 +6364,8 @@
     return fallback ? fallback[1] : null;
   }
 
+  // Thin wrapper around fetch that injects the Monitor API key and surfaces
+  // reasonably descriptive errors.
   async function fetchWasApi(path, { signal } = {}) {
     const apiKey = ensureMonitorApiKey();
     const url = `${wasApiBaseUrl}${path}`;
@@ -6220,6 +6385,7 @@
     return res.json();
   }
 
+  // Normalizes the various API shapes into a simple runs array.
   function getRunsArray(payload) {
     if (!payload) return [];
     if (Array.isArray(payload)) return payload;
@@ -6229,6 +6395,7 @@
     return [];
   }
 
+  // Returns the run entry with the highest numeric run number.
   function selectLatestRun(runs) {
     if (!runs || !runs.length) return null;
     return runs.reduce((best, run) => {
@@ -6240,10 +6407,13 @@
     }, null);
   }
 
+  // Sanitizes labels by removing punctuation/whitespace so fuzzy matching can
+  // compare different API payload shapes.
   function normalizeKeyFragment(value) {
     return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
   }
 
+  // Ensures impact counts are finite non-negative numbers before charting.
   function getNumericCountValue(value) {
     const num = coerceNumber(value, Number.NaN);
     if (Number.isNaN(num)) return null;
@@ -6251,6 +6421,8 @@
     return num;
   }
 
+  // Given an arbitrary object from a Monitor payload, try to determine whether
+  // it represents counts for a specific severity (critical, serious, etc.).
   function matchPageCountEntry(entry, severityKey) {
     if (!entry || typeof entry !== 'object') return null;
     const labelSource =
@@ -6277,6 +6449,8 @@
     return getNumericCountValue(value);
   }
 
+  // Recursively walks nested arrays/objects to locate severity counts for
+  // page impact data.
   function findPageImpactCountInNode(node, severityKey, visited) {
     if (!node || typeof node !== 'object') return null;
     if (!visited) visited = new WeakSet();
@@ -6326,6 +6500,7 @@
     return null;
   }
 
+  // Entry point for the severity crawling helpers above.
   function extractPageImpactCountFromMetrics(pages, severity) {
     if (!severity) return null;
     if (!pages || typeof pages !== 'object') return null;
@@ -6335,6 +6510,8 @@
     return Number.isFinite(count) ? count : null;
   }
 
+  // Given a row from the scans table, fetch its latest run and summarize issue
+  // and page-impact counts in a consistent shape.
   async function fetchRunMetricsForRow(row, { signal } = {}) {
     if (!row) throw new Error('Scan not found.');
     const scanId = extractScanIdFromUrl(row.url || row.scanUrl || '');
@@ -6364,6 +6541,8 @@
     };
   }
 
+  // Inspects the Monitor table headers to figure out which column is actively
+  // sorted (aria-sort) so we can mirror the same sort when rebuilding data.
   function detectSortMeta(headers, columnIndexes) {
     if (!headers || !headers.length) {
       return { index: 0, direction: 'asc', field: 'name', type: 'text', label: '' };
@@ -6417,6 +6596,8 @@
     return { index: sortIdx, direction, field, type, label };
   }
 
+  // Produces a comparable value for the requested column, falling back to raw
+  // cell text when we don't have precomputed data on the row.
   function getRowSortComparable(meta, rowData, cells) {
     if (!meta) return rowData.originalIndex;
     switch (meta.field) {
@@ -6455,12 +6636,15 @@
     }
   }
 
+  // Creates a zeroed bucket object keyed by the provided list (used for impact
+  // histograms).
   function initImpactBuckets(order) {
     const bucket = {};
     order.forEach(label => { bucket[label] = 0; });
     return bucket;
   }
 
+  // Converts an issue count into the matching histogram band label.
   function getImpactBandIssues(n) {
     if (n === 0) return '0';
     if (n <= 25) return '1-25';
@@ -6471,6 +6655,7 @@
     return '>500';
   }
 
+  // Same idea but for page counts, with labels expected by the UI legend.
   function getImpactBandPages(n) {
     if (n <= 0) return '0 pages';
     if (n === 1) return '1 page';
@@ -6485,16 +6670,22 @@
     return '>1000 pages';
   }
 
+  // Peek at the inline radio buttons to see if the Monitor page is showing
+  // issues or pages; used when syncing filters.
   function getActiveViewMode() {
     const checked = document.querySelector('.Radio--inline input[name="view"]:checked');
     const value = (checked?.value || '').toLowerCase();
     return value === 'pages' ? 'pages' : 'issues';
   }
 
+  // Returns the node list for the view toggle radios so callers can attach
+  // events or trigger clicks.
   function getViewInputs() {
     return Array.from(document.querySelectorAll('.Radio--inline input[name="view"]'));
   }
 
+  // Switches the Monitor table to the requested view by simulating a click and
+  // waiting for the page to refresh.
   async function ensureViewMode(mode) {
     const normalized = mode === 'pages' ? 'pages' : 'issues';
     const current = getActiveViewMode();
@@ -6505,6 +6696,8 @@
     await performTableUpdate(() => triggerClick(target));
   }
 
+  // Utility for grabbing whichever tab panel is currently visible, handy when
+  // preserving accordion open/close state across rerenders.
   function getActivePanelElement(container) {
     if (!container) return null;
     if (container.classList && container.classList.contains('a11y-tabpanel') && !container.hasAttribute('hidden')) {
@@ -6519,6 +6712,7 @@
     return null;
   }
 
+  // Convenience getters for severity counts that default to 0 when missing.
   function getRowCritical(row) {
     return Number.isFinite(row?.crit) ? row.crit : 0;
   }
@@ -6527,6 +6721,8 @@
     return Number.isFinite(row?.serious) ? row.serious : 0;
   }
 
+  // Returns the total issue count for a scan row, using API data when the user
+  // has opted into Monitor API metrics.
   function getRowTotalIssues(row) {
     if (getPageImpactSource() === 'api') {
       const counts = getIssueImpactCounts(row);
@@ -6540,6 +6736,8 @@
   }
 
   // Issue impact counts (per-scan issues, not pages)
+  // Pulls severity counts from either the API (preferred) or whatever the page
+  // already exposed, normalizing everything to numbers.
   function getIssueImpactCounts(row) {
     const getValue = value => Math.max(0, coerceNumber(value, 0));
     const pick = (target, key) => (target && target[key] != null) ? target[key] : 0;
@@ -6562,10 +6760,13 @@
     };
   }
 
+  // Helpful when deciding whether a severity relies on API-only data.
   function requiresMonitorApiImpact(key) {
     return monitorApiOnlyImpactKeys.has(key);
   }
 
+  // Determines whether we actually have a usable value for a given severity
+  // under the current data source.
   function hasIssueImpactValue(row, key) {
     if (!requiresMonitorApiImpact(key)) return true;
     if (getPageImpactSource() !== 'api') return false;
@@ -6574,6 +6775,7 @@
     return Number.isFinite(record.issues[key]);
   }
 
+  // Applies the active severity filter to the row counts.
   function getFilteredIssueImpactCounts(row) {
     const counts = getIssueImpactCounts(row);
     const active = getActivePageImpactSet();
@@ -6585,11 +6787,13 @@
     };
   }
 
+  // Sum helper for filtered issue counts.
   function getIssueTotal(row) {
     const c = getFilteredIssueImpactCounts(row);
     return c.critical + c.serious + c.moderate + c.minor;
   }
 
+  // Extracts per-severity page counts from the Monitor UI (non-API path).
   function getWebsitePageImpactCounts(row) {
     const getValue = value => Math.max(0, coerceNumber(value, 0));
     const pick = (target, keys) => {
@@ -6606,6 +6810,8 @@
     };
   }
 
+  // Clamps arbitrary values to non-negative numbers, returning null when the
+  // source isn't usable.
   function normalizePageImpactValue(value) {
     if (value == null) return null;
     const numeric = coerceNumber(value, Number.NaN);
@@ -6613,6 +6819,8 @@
     return Math.max(0, numeric);
   }
 
+  // Decides whether to use API-derived page counts or the inline website ones
+  // based on the user's source selection.
   function getPageImpactCounts(row) {
     const websiteCounts = getWebsitePageImpactCounts(row);
     if (getPageImpactSourceForView() === 'api') {
@@ -6629,6 +6837,7 @@
     return websiteCounts;
   }
 
+  // Applies the active severity selection to page counts.
   function getFilteredPageImpactCounts(row) {
     const counts = getPageImpactCounts(row);
     const active = getActivePageImpactSet();
@@ -6640,21 +6849,25 @@
     };
   }
 
+  // Sum helper for filtered page counts.
   function getPageTotal(row) {
     const counts = getFilteredPageImpactCounts(row);
     return counts.critical + counts.serious + counts.moderate + counts.minor;
   }
 
+  // Quick lookup helper so the UI can retrieve labels/metadata for a field key.
   function getRankingFieldOption(value) {
     return rankingFieldLookup.get(value) || null;
   }
 
+  // Baseline criteria list used when users haven't customized ranking.
   function getDefaultRankingCriteria() {
     return rankingFieldOptions
       .filter(option => option.default !== false)
       .map(option => option.value);
   }
 
+  // Dedupes and validates stored criteria arrays, falling back to defaults.
   function sanitizeRankingCriteria(values) {
     const seen = new Set();
     const order = [];
@@ -6675,6 +6888,7 @@
     return order;
   }
 
+  // Pulls persisted criteria from localStorage, tolerating parse errors.
   function loadRankingCriteriaFromStorage() {
     if (typeof localStorage === 'undefined') {
       return getDefaultRankingCriteria();
@@ -6690,6 +6904,8 @@
     }
   }
 
+  // Returns the active ranking order, optionally appending built-in fallback
+  // fields so comparisons always terminate.
   function getRankingCriteria({ includeFallback = false } = {}) {
     if (!Array.isArray(rankingState.criteria)) {
       rankingState.criteria = loadRankingCriteriaFromStorage();
@@ -6709,6 +6925,7 @@
     return criteria;
   }
 
+  // Persists a new ranking order and refreshes the summary UI.
   function setRankingCriteria(values) {
     const sanitized = sanitizeRankingCriteria(values);
     if (typeof localStorage !== 'undefined') {
@@ -6723,6 +6940,7 @@
     return sanitized;
   }
 
+  // Reverts to defaults and updates storage + UI in one step.
   function resetRankingCriteria() {
     return setRankingCriteria(getDefaultRankingCriteria());
   }
@@ -6731,16 +6949,19 @@
     return getRankingCriteria().length;
   }
 
+  // Check whether any of the selected criteria require API-backed data.
   function rankingCriteriaUsesMonitorApi(criteria = getRankingCriteria()) {
     return criteria.some(value => Boolean(getRankingFieldOption(value)?.requiresApi));
   }
 
+  // Indicates whether we've loaded API data for at least one scan.
   function isMonitorApiReadyForRanking() {
     if (getPageImpactSource() !== 'api') return false;
     if (pageImpactApiState.status !== 'ready') return false;
     return pageImpactApiState.data.size > 0;
   }
 
+  // Prevents users from picking API-only fields until data is ready.
   function isRankingFieldAvailable(value) {
     const option = getRankingFieldOption(value);
     if (!option) return false;
@@ -6748,6 +6969,7 @@
     return isMonitorApiReadyForRanking();
   }
 
+  // Returns the best available score metric for ranking comparisons.
   function getRankingScoreValue(row) {
     if (Number.isFinite(row?.scoreVal)) return row.scoreVal;
     if (Number.isFinite(row?.avgScore)) return row.avgScore;
@@ -6765,6 +6987,7 @@
     return getRowTotalIssues(row);
   }
 
+  // Moderate/minor metrics are often missing, so we guard and re-use API data.
   function getRankingImpactCount(row, key) {
     if (Number.isFinite(row?.[key])) return row[key];
     if (!hasIssueImpactValue(row, key)) return null;
@@ -6776,6 +6999,7 @@
     return (row?.name || row?.label || row?.scan || '').trim();
   }
 
+  // Shared numeric comparator helpers help keep NaN handling consistent.
   function compareNumericDesc(aVal, bVal, missing = -Infinity) {
     const aNum = Number.isFinite(aVal) ? aVal : missing;
     const bNum = Number.isFinite(bVal) ? bVal : missing;
@@ -6790,6 +7014,7 @@
     return aNum - bNum;
   }
 
+  // Single-field comparator that powers the multi-field ranking logic.
   function compareRankingField(a, b, key) {
     switch (key) {
       case 'score':
@@ -6813,6 +7038,7 @@
     }
   }
 
+  // Applies the full ordered criteria list until a difference is found.
   function compareByRankingCriteria(a, b, criteria = null) {
     const list = (criteria && criteria.length ? criteria : getRankingCriteria({ includeFallback: true }));
     for (let i = 0; i < list.length; i += 1) {
@@ -6827,6 +7053,7 @@
     return labelA.localeCompare(labelB, undefined, { sensitivity: 'base' });
   }
 
+  // Generates deterministic strings for a given field so we can memoize / diff.
   function getRankingSignatureValue(row, field) {
     switch (field) {
       case 'score': {
@@ -6868,6 +7095,7 @@
     return criteria.map(field => getRankingSignatureValue(row, field)).join('|');
   }
 
+  // Create the "Ranking" pill/button shown in the dialog header.
   function buildRankingControlBlock() {
     if (pageContext !== 'scans') return null;
     const wrapper = document.createElement('div');
@@ -6890,6 +7118,8 @@
     return wrapper;
   }
 
+  // Updates the button label + summary text to reflect current selections and
+  // warn when API data is required but unavailable.
   function updateRankingSummaryUi() {
     const criteria = getRankingCriteria();
     const button = rankingState.triggerButton;
@@ -6914,6 +7144,7 @@
     }
   }
 
+  // Totals issue counts per domain so we can render the grouped cards.
   function aggregateDomains(rows) {
     const map = new Map();
     rows
@@ -6938,6 +7169,7 @@
     return map;
   }
 
+  // Same idea but focused on page impacts (critical/serious/moderate/minor).
   function aggregatePageDomains(rows) {
     const map = new Map();
     rows
@@ -6959,6 +7191,7 @@
     return map;
   }
 
+  // Human-friendly string shown in summaries + aria labels.
   function getPageImpactFilterSummaryText() {
     const sourceLabel = getPageImpactSourceLabel(getPageImpactSourceForView());
     return `Impact filter (${sourceLabel}): ${formatPageImpactSelection(getActivePageImpactKeys())}`;
@@ -6969,6 +7202,7 @@
     summaryEl.textContent = getPageImpactFilterSummaryText();
   }
 
+  // Keeps the impact filter button text + aria-label in sync with state.
   function updatePageImpactFilterButton(button = pageImpactFilterState.button) {
     if (!button) return;
     const selectionText = formatPageImpactSelection(getActivePageImpactKeys());
@@ -6980,6 +7214,7 @@
     if (valueEl) valueEl.textContent = `${sourceLabel} - ${selectionText}`;
   }
 
+  // Updates the source toggle chips, aria-pressed state, and summary warnings.
   function updatePageImpactSourceControls() {
     const source = getPageImpactSource();
     const map = pageImpactFilterState.sourceButtons;
@@ -6999,6 +7234,8 @@
     updateRankingSummaryUi();
   }
 
+  // Reflects the current Monitor API status in both the filter popover and
+  // footer chips, including loading/error/missing-metadata states.
   function updatePageImpactApiControls() {
     const container = pageImpactFilterState.apiContainer;
     const statusEl = pageImpactFilterState.apiStatusEl;
@@ -7135,6 +7372,7 @@
     updateRankingSummaryUi();
   }
 
+  // API status chips double as quick actions; this centralizes their behavior.
   async function handleMonitorApiChipClick(target = pageImpactFilterState.apiChip) {
     const chip = target;
     if (!chip || chip.disabled) return;
@@ -7154,6 +7392,7 @@
     }
   }
 
+  // Tears down the custom popover and restores focus/aria bookkeeping.
   function closePageImpactFilterPopover({ focusButton = false } = {}) {
     if (pageImpactFilterState.outsideClickHandler) {
       document.removeEventListener('mousedown', pageImpactFilterState.outsideClickHandler, true);
@@ -7179,6 +7418,7 @@
     }
   }
 
+  // Manually positions the popover since we're outside of any framework.
   function positionPageImpactPopover(popover, anchor) {
     if (!popover || !anchor) return;
     const rect = anchor.getBoundingClientRect();
@@ -7190,6 +7430,8 @@
     popover.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
   }
 
+  // Creates a labeled checkbox for a severity option, syncing checked state to
+  // the working Set used by the popover.
   function buildImpactCheckbox(option, workingSelection, onToggle) {
     const wrap = document.createElement('label');
     wrap.className = 'a11y-page-impact-option';
@@ -7211,6 +7453,8 @@
     return { wrap, input };
   }
 
+  // Builds the entire impact filter popover: checkboxes, source hints, buttons,
+  // keyboard handling, and apply/reset logic.
   function openPageImpactFilterPopover(button) {
     if (!button) return;
     closePageImpactFilterPopover({ focusButton: false });
@@ -7465,6 +7709,7 @@
     }
   }
 
+  // Renders the two-state "Website vs Monitor API" segmented control.
   function buildPageImpactSourceToggleControl() {
     if (!Array.isArray(pageImpactSourceOptions) || !pageImpactSourceOptions.length) {
       return null;
@@ -7518,6 +7763,7 @@
     return sourceSegment;
   }
 
+  // Reusable status chip shown near controls/footers; clickable for actions.
   function createMonitorApiChipElement() {
     const chip = document.createElement('button');
     chip.type = 'button';
@@ -7542,6 +7788,7 @@
 
   const monitorApiChipIndicatorSvg = '<svg overflow="visible" preserveAspectRatio="none" viewBox="0 0 16 16" height="16" width="16"><path d="M8 1a.75.75 0 0 1 .75.75v4.5h4.5a.75.75 0 0 1 0 1.5h-5.25A.75.75 0 0 1 7.25 7V1.75A.75.75 0 0 1 8 1Zm-5 4a.75.75 0 0 0-.53 1.28l3.75 3.75v2.19a2.78 2.78 0 0 0 4.74 1.96l3.06-3.06a.75.75 0 1 0-1.06-1.06l-3.06 3.06a1.28 1.28 0 0 1-2.18-.9v-2.5a.75.75 0 0 0-.22-.53L4.53 5.28A.75.75 0 0 0 3 5Z" fill="currentColor" vector-effect="non-scaling-stroke"></path></svg>';
 
+  // Updates the chip text/icon in one place so all copies stay in sync.
   function renderMonitorApiChipContent(target, text, { interactive = false } = {}) {
     if (!target) return;
     target.innerHTML = '';
@@ -7558,6 +7805,7 @@
     }
   }
 
+  // Main entry point for constructing the impact filter button + status chips.
   function buildPageImpactFilterControls() {
     const block = document.createElement('div');
     block.className = 'a11y-page-impact-filter-block';
@@ -7613,6 +7861,7 @@
     return block;
   }
 
+  // Whenever selection/source changes, refresh dependent UI and rerender panels.
   function handlePageImpactFilterChanged() {
     updatePageImpactFilterButton();
     updatePageImpactFilterSummary();
@@ -7637,6 +7886,8 @@
     }
   }
 
+  // Kicks off the long-running Monitor API fetch workflow with progress UI,
+  // concurrency management, and error reporting.
   async function requestPageImpactApiData({ mode, includeAll = false } = {}) {
     if (pageContext !== 'scans') {
       alert('API data is only available from the scans summary view.');
@@ -7823,6 +8074,8 @@
     }
   }
 
+  // Legacy helper for the table ranking view (kept separate from the insights
+  // modal formatter because it allows custom fallbacks).
   function formatScoreValue(value, fallback = '—') {
     return Number.isFinite(value) ? `${value.toFixed(1)}%` : fallback;
   }
@@ -7934,6 +8187,8 @@
     });
   }
 
+  // Ensures the WAS report configuration always contains every default entry
+  // and that each row has a usable desktop/mobile/pdf label/id pair.
   function ensureWasConfigDefaults() {
     const existingNames = new Set(wasConfig.map(row => row.name));
     defaultWasReports.forEach(defaultRow => {
@@ -7965,10 +8220,13 @@
     });
   }
 
+  // Convenience helper for filtering out disabled WAS report definitions.
   function getEnabledWasRows() {
     return wasConfig.filter(row => row.enabled !== false);
   }
 
+  // Normalizes a URL or path relative to the current origin for consistent
+  // dataset comparisons.
   function toAbsoluteUrl(url) {
     if (!url) return null;
     try {
@@ -7978,6 +8236,7 @@
     }
   }
 
+  // Simple retry wrapper for API fetchers prone to transient Monitor hiccups.
   async function fetchWithRetry(task, attempts = 2) {
     let lastError;
     for (let i = 0; i < attempts; i++) {
@@ -7991,6 +8250,8 @@
     throw lastError;
   }
 
+  // Attempts to derive a numeric value from a node's text or aria attributes;
+  // used heavily when scraping the Monitor UI for counts.
   function getNumericText(el) {
     if (!el) return null;
     const sources = [];
@@ -8009,20 +8270,26 @@
     return null;
   }
 
+  // Defensive helper for reading anchor hrefs whether they come from DOM attrs
+  // or property assignments.
   function anchorHref(anchor) {
     if (!anchor) return '';
     return anchor.getAttribute('href') || anchor.href || '';
   }
 
+  // Escapes user-provided strings before building regex patterns.
   function escapeRegExp(str) {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
+  // Title-cases a word for display in generated labels.
   function capitalize(word) {
     if (!word) return '';
     return word.charAt(0).toUpperCase() + word.slice(1);
   }
 
+  // Determines whether an anchor's href or data attributes represent a given
+  // impact level (critical/serious/etc.).
   function anchorMatchesImpact(anchor, impactValue) {
     const rawHref = anchorHref(anchor);
     const values = Array.isArray(impactValue) ? impactValue : [impactValue];
@@ -8063,6 +8330,8 @@
     });
   }
 
+  // Specialized matcher for "needs review" links, accounting for varied
+  // parameter spellings.
   function anchorMatchesNeedsReview(anchor) {
     const rawHref = anchorHref(anchor);
     if (!rawHref) return false;
@@ -8080,6 +8349,8 @@
     return anchorMatchesImpact(anchor, ['needsreview','needs_review','needs-review','needs review']);
   }
 
+  // Searches nearby elements for a numeric value when the anchor itself lacks
+  // inline counts.
   function findNumericInScope(scope) {
     if (!scope) return null;
     const selectors = ['span','strong','div','p','a'];
@@ -8092,6 +8363,8 @@
     return null;
   }
 
+  // Generic utility for locating numbers associated with anchors that satisfy
+  // a predicate (impact type, needs review, etc.).
   function findCountByAnchor(doc, matcher) {
     if (!doc || typeof matcher !== 'function') return null;
     const anchors = Array.from(doc.querySelectorAll('a[href]'));
@@ -8112,6 +8385,8 @@
     return null;
   }
 
+  // Attempts to locate the "Issues by impact" section so other scrapers have
+  // a consistent root.
   function findIssuesByImpactSection(doc) {
     if (!doc) return null;
     const selectors = [
@@ -8134,6 +8409,8 @@
     }) || null;
   }
 
+  // Locates the PDF-specific "pages with critical issues" label to seed
+  // fallback scrapes.
   function findPdfCriticalLabel(doc) {
     if (!doc) return null;
     const selectors = [
@@ -8147,6 +8424,8 @@
     return null;
   }
 
+  // Scrapes critical/serious/needs-review counts from whatever DOM the Monitor
+  // page currently renders, using multiple fallback strategies.
   function extractIssueCounts(doc) {
     const labels = [
       { key: 'critical', id: 'issue-count-critical', regex: /critical/i, anchorMatch: anchor => anchorMatchesImpact(anchor, ['3','critical']) },
@@ -8189,6 +8468,7 @@
     return result;
   }
 
+  // Special-case scraper for PDF panels where the markup differs from scans.
   function extractPdfCritical(doc) {
     let val = findCountByAnchor(doc, anchor => anchorMatchesImpact(anchor, ['3','critical']));
     if (val == null) {
@@ -8219,6 +8499,8 @@
     return Number.isFinite(val) ? val : 0;
   }
 
+  // Pulls aggregated issue counts for a scan via the WAS API and normalizes the
+  // shape so the WAS comparison table can display them.
   async function fetchIssueCountsForScan(row, { signal } = {}) {
     const metrics = await fetchRunMetricsForRow(row, { signal });
     return {
@@ -8231,6 +8513,8 @@
     };
   }
 
+  // Similar to fetchIssueCountsForScan but only cares about pages with critical
+  // issues in the PDF run.
   async function fetchPdfCountsForScan(row, { signal } = {}) {
     const metrics = await fetchRunMetricsForRow(row, { signal });
     return {
@@ -8241,6 +8525,8 @@
     };
   }
 
+  // Iterates through the configured WAS report list, resolving each name back
+  // to a scan row and fetching desktop/mobile/pdf metrics with progress events.
   async function loadWasMetrics(rowLookup, rowsToProcess, { onProgress, signal } = {}) {
     const activeRows = (rowsToProcess || wasConfig).filter(row => row.enabled !== false);
     const total = activeRows.length;
@@ -8277,6 +8563,7 @@
     return results;
   }
 
+  // Establishes which accordions should start opened per tab context.
   function getDefaultAccordionState(tabKey) {
     if (tabKey === 'status') {
       return { 'Scan Status': true };
@@ -8301,12 +8588,14 @@
     { label: '<20%', min: null, max: 19.999 }
   ];
 
+  // Creates an empty histogram keyed by the scoreBucketSpecs labels.
   function makeScoreBuckets() {
     const buckets = {};
     scoreBucketSpecs.forEach(spec => { buckets[spec.label] = 0; });
     return buckets;
   }
 
+  // Determines which score bucket a numeric value falls into.
   function getScoreBucketLabel(scoreVal) {
     if (!Number.isFinite(scoreVal)) return null;
     for (const spec of scoreBucketSpecs) {
@@ -8317,11 +8606,13 @@
     return '<20%';
   }
 
+  // Basic percentage formatter that guards against divide-by-zero.
   function pctOf(count, denom) {
     if (!denom) return '0.0%';
     return ((count / denom) * 100).toFixed(1) + '%';
   }
 
+  // Produces a gradient color between two hex values based on t ∈ [0,1].
   function lerpColor(c1, c2, t) {
     function parse(c) {
       const m = c.trim().match(/^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i);
@@ -8335,6 +8626,7 @@
     return `rgb(${r},${g},${b})`;
   }
 
+  // Maps severity histogram bands onto a gradient for consistent visuals.
   function getSeverityColorForBand(band, order) {
     const idx = order.indexOf(band);
     if (idx === -1) return 'var(--metric-accent-mid)';
@@ -8344,6 +8636,8 @@
     return lerpColor(good, bad, t);
   }
 
+  // Scrapes the "scan runs in progress" collapsible table to power the dialog
+  // shown from the Scan Insights modal.
   function parseRunsInProgress() {
     const expandButtons = Array.from(document.querySelectorAll('.ExpandCollapse__trigger'));
     const progressButton = expandButtons.find(btn =>
@@ -8400,6 +8694,8 @@
     return { runs: matches, total };
   }
 
+  // Applies aria-hidden/inert to everything except the modal root to emulate
+  // the platform dialog-inert behavior.
   function setBackgroundInert(excludeEl) {
     Array.from(document.body.children).forEach(el => {
       if (el === root) return;
@@ -8412,6 +8708,7 @@
     });
   }
 
+  // Restores the DOM to its pre-modal state by removing the inert markers.
   function clearBackgroundInert() {
     Array.from(document.body.children).forEach(el => {
       if (el.hasAttribute(inertAttr)) {
@@ -8422,6 +8719,7 @@
     });
   }
 
+  // Dedupes and validates persisted impact selections to prevent stale keys.
   function sanitizePageImpactSelection(keys) {
     if (!Array.isArray(keys)) return [];
     const valid = new Set(pageImpactFilterOptions.map(option => option.key));
@@ -8434,6 +8732,8 @@
     return cleaned;
   }
 
+  // Returns which severities are available for the chosen data source and
+  // optionally narrows them for the current tab (pages view hides API data).
   function getAllowedImpactKeysForSource(source, { scopedToView = false } = {}) {
     const key = source === 'api' ? 'api' : 'website';
     const allowedBase = pageImpactSourceAllowedKeys[key] || pageImpactSourceAllowedKeys[defaultPageImpactSource];
@@ -8451,6 +8751,8 @@
     return allowed;
   }
 
+  // Default checkbox set used when the user hasn't customized their filter for
+  // the given source.
   function getDefaultImpactsForSource(source = defaultPageImpactSource) {
     const allowed = getAllowedImpactKeysForSource(source);
     return pageImpactFilterOptions
@@ -8458,6 +8760,8 @@
       .filter(key => allowed.has(key));
   }
 
+  // Similar to getDefaultImpactsForSource but ensures at least one option works
+  // for the currently active tab.
   function getDefaultImpactsForView(source = defaultPageImpactSource) {
     const allowed = getAllowedImpactKeysForSource(source, { scopedToView: true });
     const defaults = pageImpactFilterOptions
@@ -8466,6 +8770,8 @@
     return defaults.length ? defaults : Array.from(allowed);
   }
 
+  // Reorders and filters the selection array so it only contains allowed keys
+  // for the requested source.
   function normalizeSelectionForSource(keys, source) {
     const allowed = getAllowedImpactKeysForSource(source);
     const list = Array.isArray(keys) ? keys.slice() : Array.from(keys || []);
@@ -8479,6 +8785,7 @@
     return cleaned;
   }
 
+  // Restores persisted impact selections + source from localStorage on load.
   function loadStoredPageImpactFilters() {
     try {
       const raw = localStorage.getItem(pageImpactFilterStorageKey);
@@ -8506,6 +8813,7 @@
     }
   }
 
+  // Writes the filter selection to storage for future sessions.
   function persistPageImpactFilters(selectionKeys, source = pageImpactFilterState.source) {
     try {
       const keys = Array.isArray(selectionKeys) ? selectionKeys.slice() : Array.from(selectionKeys || []);
@@ -8519,12 +8827,14 @@
     }
   }
 
+  // Core setter used by UI controls to update both the selection set and source.
   function applyPageImpactFilter(selectionKeys, source) {
     const normalizedSource = (source === 'api' || source === 'website') ? source : defaultPageImpactSource;
     pageImpactFilterState.source = normalizedSource;
     setPageImpactSelection(selectionKeys, normalizedSource);
   }
 
+  // Updates the working Set in memory, ensuring it's never empty.
   function setPageImpactSelection(keys, source = pageImpactFilterState.source) {
     const cleaned = sanitizePageImpactSelection(Array.isArray(keys) ? keys : Array.from(keys || []));
     const normalized = normalizeSelectionForSource(cleaned, source);
@@ -8533,6 +8843,8 @@
     persistPageImpactFilters(next, source);
   }
 
+  // Switches between "website" and "api" sources, automatically padding the
+  // selection with defaults when entering API mode.
   function setPageImpactSource(source) {
     const normalizedSource = (source === 'api' || source === 'website') ? source : defaultPageImpactSource;
     if (normalizedSource === 'api' && isPagesTabActive()) {
@@ -8553,6 +8865,7 @@
     return pageImpactFilterState.source || defaultPageImpactSource;
   }
 
+  // The "Pages" tab always uses website data; this helper enforces that.
   function getPageImpactSourceForView() {
     if (isPagesTabActive()) {
       return defaultPageImpactSource;
@@ -8567,6 +8880,8 @@
     return fallback ? fallback.label : source;
   }
 
+  // Returns the Set of severities that are both selected and allowed for the
+  // current view, auto-fixing invalid storage states.
   function getActivePageImpactSet() {
     const source = getPageImpactSource();
     if (!pageImpactFilterState.selection || !pageImpactFilterState.selection.size) {
@@ -8589,6 +8904,7 @@
     return new Set(finalViewKeys);
   }
 
+  // Normalizes the scan ID used as the primary key across many caches.
   function getRowScanId(row) {
     if (!row) return null;
     if (row.scanId != null && row.scanId !== '') return String(row.scanId);
@@ -8597,6 +8913,8 @@
     return id ? String(id) : null;
   }
 
+  // Collects the currently visible scan rows (issues + pages tabs) so impact
+  // filters know which scans need Monitor API coverage.
   function getImpactScanRows() {
     const map = new Map();
     const addRow = row => {
@@ -8617,6 +8935,7 @@
     return Array.from(getImpactScanRows().keys());
   }
 
+  // Retrieves the cached API payload for a given scan, if available.
   function getPageImpactApiRecord(rowOrId) {
     if (!rowOrId) return null;
     const key = typeof rowOrId === 'string' ? rowOrId : getRowScanId(rowOrId);
@@ -8624,6 +8943,7 @@
     return pageImpactApiState.data.get(String(key)) || null;
   }
 
+  // Summarizes how many scans currently have Monitor API data cached.
   function getPageImpactApiCoverage() {
     const ids = getImpactScanIds();
     const total = ids.length;
@@ -8646,6 +8966,7 @@
     pageImpactFilterState.footerBaseTimestamp = value || '';
   }
 
+  // Convenience to reuse the shared footer status element across controls.
   function setFooterRefreshMessage(message) {
     const info = pageImpactFilterState.footerInfoEl;
     if (!info) return;
@@ -8654,6 +8975,8 @@
     info.textContent = finalText;
   }
 
+  // Detects whether the user is attempting to select moderate/minor impacts,
+  // which require API data.
   function selectionHasMonitorApiOnlyImpacts(selection) {
     if (!selection) return false;
     const values = selection instanceof Set
@@ -8664,6 +8987,8 @@
     return values.some(key => monitorApiOnlyImpactKeys.has(key));
   }
 
+  // Prompt users to load Monitor API data when needed (and kick off fetches if
+  // they accept).
   async function ensureMonitorApiDataAvailability({ reason = 'toggle', selection } = {}) {
     if (isMonitorApiDataReady()) return true;
     if (pageImpactApiState.status === 'loading') return true;
@@ -8696,6 +9021,8 @@
     }
   }
 
+  // Small dialog that nudges users to fetch missing API data right from the
+  // footer chip.
   async function openMonitorApiMissingDialog({ missing, total }) {
     if (!missing) return;
     const plural = total === 1 ? 'scan' : 'scans';
@@ -8722,6 +9049,7 @@
     return getActivePageImpactSet().has(key);
   }
 
+  // Formats the selected severities as human-friendly text for buttons.
   function formatPageImpactSelection(keys = getActivePageImpactKeys()) {
     if (!keys || !keys.length) return 'None';
     const active = new Set(keys);
@@ -8731,12 +9059,15 @@
     return labels.join(', ') || 'None';
   }
 
+  // Extracts tabbable elements within a dialog/panel for focus trapping.
   function getFocusable(container) {
     return Array.from(container.querySelectorAll(
       'a[href], area[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), summary, [tabindex]:not([tabindex="-1"])'
     ));
   }
 
+  // Takes a flat list of "Domain - Subdomain" labels and produces groups for
+  // nested filter UIs.
   function buildDomainHierarchy(domains) {
     const order = [];
     const map = new Map();
@@ -8787,6 +9118,8 @@
     return normalized;
   }
 
+  // Ensures we insert overlays near the footer to avoid stacking issues with
+  // Monitor's fixed headers.
   function appendOverlayAfterFooter(overlay) {
     const footer = document.querySelector('footer');
     const parent = footer?.parentNode || document.body;
@@ -8810,6 +9143,7 @@
     }
   }
 
+  // Polling utility used by many scraping flows to await DOM/state changes.
   async function waitForCondition(checkFn, { timeout = 5000, interval = 100 } = {}) {
     const start = Date.now();
     return new Promise((resolve, reject) => {
@@ -8833,22 +9167,26 @@
     });
   }
 
+  // Waits for a selector to match beneath the provided root, rejecting on timeout.
   async function waitForElement(selector, { timeout = 5000, root = document } = {}) {
     return waitForCondition(() => {
       return root.querySelector(selector);
     }, { timeout });
   }
 
+  // Points to the main pagination bar beneath the Monitor table.
   function getPaginationContainer() {
     return document.querySelector('#main-content .Pagination') ||
       document.querySelector('.Pagination');
   }
 
+  // Returns the dropdown controlling how many rows appear per page.
   function getPageSizeSelect() {
     return document.querySelector('#page-size-select-3') ||
       document.querySelector('select[id^="page-size-select"]');
   }
 
+  // Parses the pagination log ("1-25 of 90") into numeric fields.
   function getPaginationStatus() {
     const container = getPaginationContainer();
     if (!container) return null;
@@ -8884,6 +9222,7 @@
     return { start, end, total, text };
   }
 
+  // Gives the UI a moment to advance pagination and returns the updated status.
   async function waitForPaginationAdvance(previousStatus, delayMs = 1000) {
     await wait(delayMs);
     const nextStatus = getPaginationStatus();
@@ -8901,6 +9240,7 @@
     return nextStatus || previousStatus || null;
   }
 
+  // Builds a lightweight fingerprint of the scans table for change detection.
   function getTableSignature() {
     const table = findScansTable();
     if (!table) return '';
@@ -8912,6 +9252,7 @@
     return `${rows}::${count}`;
   }
 
+  // Polls the scans table signature until it differs from the previous value.
   async function waitForTableChange(prevSignature, timeout = 7000) {
     const start = Date.now();
     return new Promise(resolve => {
@@ -8930,6 +9271,7 @@
     });
   }
 
+  // Attempts to locate the issues list table by inspecting header text.
   function findIssuesTable() {
     const tables = Array.from(document.querySelectorAll('#main-content table, table'));
     for (const table of tables) {
@@ -8944,6 +9286,7 @@
     return tables[0] || null;
   }
 
+  // Snapshot signature for the issues table, similar to getTableSignature.
   function getIssuesTableSignature() {
     const table = findIssuesTable();
     if (!table) return '';
@@ -8955,6 +9298,7 @@
     return `${rows}::${count}`;
   }
 
+  // Looks for the Pages tab table by checking for Page URL headers.
   function findPagesTable() {
     const tables = Array.from(document.querySelectorAll('#main-content table, table'));
     for (const table of tables) {
@@ -8968,6 +9312,7 @@
     return null;
   }
 
+  // Signature used to detect when the Pages table reloads.
   function getPagesTableSignature() {
     const table = findPagesTable();
     if (!table) return '';
@@ -8979,6 +9324,7 @@
     return `${rows}::${count}`;
   }
 
+  // Waits until the Pages table signature differs from the provided one.
   async function waitForPagesTableChange(prevSignature, timeout = 8000) {
     const start = Date.now();
     return new Promise(resolve => {
@@ -8997,10 +9343,12 @@
     });
   }
 
+  // Resolves once the Pages table exists in the DOM (with timeout fallback).
   async function waitForPagesTable({ timeout = 8000 } = {}) {
     return waitForCondition(() => findPagesTable(), { timeout }).catch(() => findPagesTable());
   }
 
+  // Extracts the most useful URL-like text from a table cell or anchor.
   function readPageUrlFromCell(cell) {
     if (!cell) return '';
     const text = cell.textContent ? cell.textContent.trim() : '';
@@ -9016,6 +9364,7 @@
     return dataValue ? dataValue.trim() : '';
   }
 
+  // Collects page URLs from the table by finding the column that houses them.
   function extractPageUrlsFromTable(table) {
     if (!table) return [];
     const headers = Array.from(table.querySelectorAll('thead th'));
@@ -9042,12 +9391,14 @@
     return urls;
   }
 
+  // Detects whether a URL looks like it points to a PDF file.
   function isPdfUrl(url) {
     if (!url) return false;
     const cleaned = url.split('#')[0].split('?')[0];
     return /\.pdf$/i.test(cleaned);
   }
 
+  // Normalizes PDF URLs for comparison by removing hash/query noise.
   function normalizePdfUrl(url) {
     if (!url) return '';
     try {
@@ -9057,6 +9408,7 @@
     }
   }
 
+  // Filters a list of URLs down to unique entries that look like PDFs.
   function filterPdfUrls(urls) {
     const deduped = [];
     const seen = new Set();
@@ -9072,6 +9424,7 @@
     return deduped;
   }
 
+  // Standardizes filenames/URLs to a lowercase token for fuzzy matching.
   function normalizeNameForMatch(value) {
     if (!value) return '';
     let base = value.replace(/[#?].*$/, '');
@@ -9083,6 +9436,7 @@
     return base.replace(/\s+/g, ' ').trim().toLowerCase();
   }
 
+  // Generates a loose match key from a URL path segment for pairing with files.
   function getUrlMatchKey(url) {
     if (!url) return '';
     let target = url;
@@ -9095,11 +9449,13 @@
     return normalizeNameForMatch(target);
   }
 
+  // Produces a match key from a file name using normalizeNameForMatch.
   function getFileMatchKey(filename) {
     if (!filename) return '';
     return normalizeNameForMatch(filename);
   }
 
+  // Parses date strings from the inspector form into Date objects.
   function parseUserDateInput(value) {
     const raw = (value || '').trim();
     if (!raw) return null;
@@ -9124,11 +9480,13 @@
     return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
 
+  // Formats parsed dates for display in the UI/logs.
   function formatPdfDateDisplay(date) {
     if (!(date instanceof Date) || Number.isNaN(date.getTime())) return 'Unknown';
     return date.toLocaleString();
   }
 
+  // Generates a short label summarizing the active PDF date filter.
   function formatFilterShort(filter) {
     if (!filter) return '';
     if (filter.mode === 'before') {
@@ -9143,6 +9501,7 @@
     return '';
   }
 
+  // Verbose sentence version of the current filter, used in logs.
   function describePdfFilter(filter) {
     if (!filter) return '';
     if (filter.mode === 'before') {
@@ -9157,6 +9516,7 @@
     return '';
   }
 
+  // Checks whether a given date satisfies the selected filter criteria.
   function evaluatePdfFilter(date, filter) {
     if (!filter || !(date instanceof Date) || Number.isNaN(date.getTime())) return false;
     if (filter.mode === 'before') {
@@ -9171,6 +9531,7 @@
     return false;
   }
 
+  // Appends to the PDF inspector's log buffer and emits to console logs.
   function pushPdfLog(message, type = 'info') {
     pdfInspectorState.log.unshift({ message, type, timestamp: Date.now() });
     pdfInspectorState.log = pdfInspectorState.log.slice(0, 200);
@@ -9178,6 +9539,7 @@
     logPdfInspector(message);
   }
 
+  // Builds a Date from partial components, defaulting missing pieces.
   function attemptDateFromParts({ year, month = 1, day = 1, hour = 0, minute = 0, second = 0, offset }) {
     if (!year) return null;
     const pad = n => String(n).padStart(2, '0');
@@ -9192,6 +9554,7 @@
     return null;
   }
 
+  // Standardizes timezone strings so the Date constructor can parse them.
   function normalizeTimezoneSuffix(offset) {
     if (!offset) return '';
     if (offset === 'Z' || offset === 'z') return 'Z';
@@ -9200,6 +9563,7 @@
     return `${cleaned.slice(0, 3)}:${cleaned.slice(3)}`;
   }
 
+  // Parses PDF "D:" metadata strings into Date objects.
   function parsePdfDDate(value) {
     const match = value.match(/^D:(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?([Zz]|[+\-]\d{2}'?\d{2}'?)?/);
     if (!match) return null;
@@ -9225,6 +9589,7 @@
     });
   }
 
+  // Handles common slash-separated date formats (MM/DD/YYYY or DD/MM/YYYY).
   function parseSlashDate(value, assumeDayFirst = false) {
     const match = value.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
     if (!match) return null;
@@ -9243,6 +9608,7 @@
     return date;
   }
 
+  // Attempts multiple parsing strategies for messy PDF metadata timestamps.
   function parsePdfMetadataDate(rawValue) {
     if (!rawValue) return null;
     let value = String(rawValue).replace(/\u0000/g, '').trim();
@@ -9283,6 +9649,7 @@
     return null;
   }
 
+  // Scans raw PDF bytes for known metadata fields that store modified dates.
   function extractPdfModifiedDate(buffer) {
     if (!buffer) return null;
     let text = '';
@@ -9359,6 +9726,7 @@
     return null;
   }
 
+  // Creates a deterministic filename for a PDF URL (fallbacks use index order).
   function getPdfFilenameFromUrl(url, index) {
     try {
       const parsed = new URL(url);
@@ -9373,6 +9741,7 @@
 
   let pdfDownloadFrame = null;
 
+  // Creates (or returns) the hidden iframe used to initiate downloads.
   function ensurePdfDownloadFrame() {
     if (pdfDownloadFrame && document.body.contains(pdfDownloadFrame)) {
       return pdfDownloadFrame;
@@ -9387,6 +9756,7 @@
     return frame;
   }
 
+  // Uses the hidden iframe to request a PDF while optionally forcing a filename.
   function triggerPdfDownload(url, filename) {
     if (!url) return;
     ensurePdfDownloadFrame();
@@ -9400,6 +9770,7 @@
     document.body.removeChild(link);
   }
 
+  // Orchestrates collection of PDF URLs and sequential download triggering.
   async function startPdfDownloadSequence() {
     if (pdfInspectorState.downloadPhase === 'downloading') {
       alert('Downloads are already being triggered.');
@@ -9449,6 +9820,7 @@
     }
   }
 
+  // Requests File System Access API permissions for the selected folder.
   async function ensureAnalysisFolderAccess(handle) {
     if (!handle) throw new Error('No folder selected.');
     if (typeof handle.queryPermission === 'function' && typeof handle.requestPermission === 'function') {
@@ -9463,6 +9835,7 @@
     return handle;
   }
 
+  // Lets the user pick the folder containing their downloaded PDFs for analysis.
   async function choosePdfAnalysisFolder() {
     if (typeof window.showDirectoryPicker !== 'function') {
       alert('Selecting a folder requires a Chromium-based browser such as Chrome or Edge.');
@@ -9497,6 +9870,7 @@
     }
   }
 
+  // Folder picker for the "match filenames to URLs" quick action.
   async function choosePdfMatchFolder() {
     if (typeof window.showDirectoryPicker !== 'function') {
       alert('Selecting a folder requires a Chromium-based browser such as Chrome or Edge.');
@@ -9526,6 +9900,7 @@
     }
   }
 
+  // Clears previous match/unmatched arrays before starting a new run.
   function resetPdfMatchResults() {
     pdfMatchState.matches = [];
     pdfMatchState.unmatched = [];
@@ -9533,6 +9908,7 @@
     pdfMatchState.lastError = '';
   }
 
+  // Walks the chosen directory and returns handles for each PDF file.
   async function collectPdfFiles(directoryHandle, { signal } = {}) {
     const files = [];
     if (!directoryHandle?.values) return files;
@@ -9549,6 +9925,7 @@
     return files;
   }
 
+  // Loads each local PDF (or downloaded equivalent) and checks metadata dates.
   async function analyzeLocalPdfs(folderHandle, urls, filter, { signal } = {}) {
     throwIfAborted(signal);
     const files = await collectPdfFiles(folderHandle, { signal });
@@ -9657,6 +10034,7 @@
     return { matches, failures };
   }
 
+  // Main entry point for PDF metadata analysis initiated from the UI.
   async function startPdfAnalysis(filter) {
     if (!pdfInspectorState.analysisFolderHandle) {
       pdfInspectorState.analysisError = 'Please choose the folder with your downloaded PDFs first.';
@@ -9712,6 +10090,7 @@
     }
   }
 
+  // Cancels an in-flight PDF analysis run via the AbortController.
   function cancelPdfAnalysis() {
     const controller = pdfInspectorState.analysisAbortController;
     if (!controller || controller.signal.aborted) {
@@ -9724,6 +10103,7 @@
     pushPdfLog('Cancelling PDF analysis…', 'info');
   }
 
+  // Matches filenames located in a folder to PDF URLs scraped from the table.
   async function matchPdfFilesWithUrls() {
     if (!pdfMatchState.folderHandle) {
       alert('Choose the folder with your downloaded PDFs first.');
@@ -9779,6 +10159,7 @@
     }
   }
 
+  // Scrapes the "Matching issues" tag above the table and returns its numeric value.
   function readMatchingIssuesCount() {
     const tags = Array.from(document.querySelectorAll('.Panel__Header .Tag, .Panel__Header .TagButton'));
     for (const tag of tags) {
@@ -9794,6 +10175,7 @@
     return null;
   }
 
+  // Polls the UI for the "matching issues" count until it stabilizes or times out.
   async function getMatchingIssuesCount({ timeout = 6000 } = {}) {
     return waitForCondition(() => {
       const value = readMatchingIssuesCount();
@@ -9801,6 +10183,7 @@
     }, { timeout }).catch(() => readMatchingIssuesCount());
   }
 
+  // Resolves once the Issues table signature changes (or a timeout occurs).
   async function waitForIssuesTableChange(prevSignature, timeout = 8000) {
     const start = Date.now();
     return new Promise(resolve => {
@@ -9819,21 +10202,28 @@
     });
   }
 
+  // Scope quick-action localStorage entries by run so they don't clash between
+  // scans.
   function getQuickActionStorageKey(prefix) {
     const runId = scanRunParam ? String(scanRunParam) : 'global';
     return `${prefix}::${runId}`;
   }
 
+  // Strips protocol noise so URLs entered in the textarea can match regardless
+  // of scheme.
   function normalizeQuickActionEntry(value) {
     return value.trim().replace(/^(https?:\/\/)/i, '');
   }
 
+  // Shared normalizer for text inputs used by filter workflows.
   function normalizeFilterValue(value) {
     if (value == null) return null;
     const normalized = normalizeQuickActionEntry(String(value));
     return normalized || null;
   }
 
+  // Converts multiline textarea input into encoded page entries and collects
+  // validation errors surfaced to the user.
   function validateQuickActionEntries(inputText) {
     const normalizedText = String(inputText || '').replace(/\r\n/g, '\n');
     const lines = normalizedText.split('\n');
@@ -9851,6 +10241,7 @@
     return { entries, errors };
   }
 
+  // Sets an input's value via the native setter so React-style handlers fire.
   function setInputValue(input, nextValue) {
     if (!input) return;
     const value = nextValue == null ? '' : String(nextValue);
@@ -9865,6 +10256,7 @@
     input.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
+  // Synthesizes the pointer/mouse sequence Monitor expects for clicks.
   function dispatchNativeClick(element) {
     if (!element) return false;
     const eventTypes = ['pointerdown','mousedown','mouseup','click'];
@@ -9880,6 +10272,7 @@
     return true;
   }
 
+  // Wrapper that first tries dispatchNativeClick and falls back to element.click.
   function triggerClick(element) {
     if (!element) return false;
     if (dispatchNativeClick(element)) return true;
@@ -9890,6 +10283,8 @@
     return false;
   }
 
+  // Fires keydown/keyup pairs for controls that only respond to keyboard
+  // activation (e.g., combobox toggles).
   function simulateKeyboardActivation(element, key = 'Enter') {
     if (!element) return false;
     const init = {
@@ -9905,6 +10300,7 @@
     return downResult;
   }
 
+  // Returns a label element associated with a control for wider click targets.
   function getAssociatedLabel(element) {
     if (!element) return null;
     if (element.id) {
@@ -9914,12 +10310,15 @@
     return element.closest?.('label') || null;
   }
 
+  // Given any host node, locate the nested checkbox input if present.
   function getCheckboxInput(element) {
     if (!element) return null;
     if (element.matches?.('input[type="checkbox"]')) return element;
     return element.querySelector?.('input[type="checkbox"]') || null;
   }
 
+  // Heuristically determines whether a checkbox-looking control is checked,
+  // accounting for custom aria/class implementations.
   function getCheckboxStateInfo(element) {
     if (!element) {
       return { checked: false, aria: null, source: 'none', input: null };
@@ -9957,6 +10356,7 @@
     return getCheckboxStateInfo(element).checked;
   }
 
+  // Captures useful debugging info when checkbox toggling fails.
   function describeCheckboxState(element) {
     const base = describeDomElement(element) || {};
     const info = getCheckboxStateInfo(element);
@@ -9973,6 +10373,8 @@
     return base;
   }
 
+  // Tries a series of clicks/events to force a checkbox into the desired state,
+  // logging detailed info if it cannot.
   async function ensureCheckboxState(element, desiredChecked, { context = 'checkbox' } = {}) {
     if (!element) return false;
     const desired = !!desiredChecked;
@@ -10014,6 +10416,8 @@
     return isCheckboxChecked(element) === desired;
   }
 
+  // Entry point for locating the bulk actions dropdown, whether it's a select
+  // or a custom combobox wrapper.
   function getBulkActionsSelect() {
     const host = document.querySelector(issuesBulkActionsSelector);
     if (!host) return null;
@@ -10023,6 +10427,8 @@
     return host;
   }
 
+  // Produces a serializable snapshot of a DOM node (tag, classes, sample text)
+  // for logging/troubleshooting.
   function describeDomElement(node) {
     if (!node) return null;
     const info = {
@@ -10044,6 +10450,7 @@
     return info;
   }
 
+  // Looks for the "Assign to" option within the bulk actions dropdown.
   function findAssignOption(bulkSelect) {
     if (!bulkSelect) return null;
     const lower = value => (value || '').toLowerCase();
@@ -10056,6 +10463,8 @@
     return option || null;
   }
 
+  // Flexible search helper used by multiple quick actions to locate options by
+  // label regex.
   function findBulkActionOptionByText(bulkSelect, regex) {
     if (!bulkSelect || !regex) return null;
     const matcher = regex instanceof RegExp ? regex : new RegExp(String(regex), 'i');
@@ -10065,6 +10474,7 @@
     return options.find(opt => matcher.test((opt.textContent || opt.value || '').trim())) || null;
   }
 
+  // Maps the select options into plain objects for logging.
   function describeBulkOptions(bulkSelect) {
     if (!bulkSelect) return [];
     return Array.from(bulkSelect.options || []).map(opt => ({
@@ -10074,6 +10484,8 @@
     }));
   }
 
+  // Extracts the "value" for a select/option-like node regardless of whether
+  // it uses attributes, dataset, or text.
   function getOptionValue(node) {
     if (!node) return '';
     if (typeof node.value === 'string' && node.value) return node.value;
@@ -10087,6 +10499,8 @@
     return text;
   }
 
+  // Checks multiple hooks (disabled attr, aria, CSS classes) to determine if an
+  // option is currently disabled.
   function isOptionNodeDisabled(node) {
     if (!node) return true;
     if (typeof node.disabled === 'boolean') return node.disabled;
@@ -10096,6 +10510,8 @@
     return classes.contains?.('is-disabled') || classes.contains?.('Option--isDisabled') || classes.contains?.('Select-option--disabled');
   }
 
+  // Normalizes an <option> or custom option node into a consistent shape used
+  // by logging and filtering routines.
   function mapOptionNode(node) {
     if (!node) return null;
     const label = (node.textContent || '').trim();
@@ -10104,6 +10520,8 @@
     return { label, value, disabled };
   }
 
+  // Finds the button that executes the current bulk action, even if Monitor has
+  // changed its aria-label text.
   function findBulkApplyButton(keyword) {
     const normalized = (keyword || '').toLowerCase();
     const explicit = issuesBulkApplyButtonSelector ? document.querySelector(issuesBulkApplyButtonSelector) : null;
@@ -10123,6 +10541,8 @@
     return null;
   }
 
+  // Returns the element that opens the assignment dropdown (select, combobox,
+  // or nested button) so scripts can click it reliably.
   function getAssignDropdownToggle(host) {
     if (!host) return null;
     if (host.tagName === 'SELECT') return null;
@@ -10133,6 +10553,8 @@
     return host;
   }
 
+  // Forces the assign dropdown to open by clicking/focusing it; useful before
+  // we wait for options to appear.
   function pokeAssignDropdown(host) {
     if (!host) return;
     const toggle = getAssignDropdownToggle(host);
@@ -10143,6 +10565,8 @@
     }
   }
 
+  // Waits for the Assign dropdown to finish populating, reopening the menu if
+  // necessary and returning the usable option list.
   async function waitForAssignSelectOptions({ timeout = 20000, minOptions = 1 } = {}) {
     let lastPoke = 0;
     return waitForCondition(() => {
@@ -10173,6 +10597,7 @@
     }, { timeout }).catch(() => null);
   }
 
+  // Polls until the Bulk Actions dropdown becomes enabled after selecting rows.
   async function waitForBulkActionsEnabled({ timeout = 6000 } = {}) {
     let bulkSelect = getBulkActionsSelect();
     if (!bulkSelect) {
@@ -10194,6 +10619,8 @@
     return bulkSelect;
   }
 
+  // Ensures the Bulk Actions dropdown actually contains option nodes before we
+  // continue automation.
   async function waitForBulkOptions({ timeout = 4000 } = {}) {
     let attempt = 0;
     const select = await waitForCondition(() => {
@@ -10218,6 +10645,7 @@
     return select;
   }
 
+  // Helper used when sniffing form controls to retrieve any visible label text.
   function getInputLabelText(input) {
     if (!input) return '';
     if (input.id) {
@@ -10229,6 +10657,7 @@
     return (input.getAttribute('aria-label') || '').trim();
   }
 
+  // Collect candidate radio inputs that control the Issues view (Page vs Issue).
   function getIssuesViewByRadios() {
     const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
     return radios
@@ -10253,6 +10682,7 @@
       });
   }
 
+  // Quick heuristics to check if a label seems to target the "Page URL" option.
   function isPageUrlLabel(labelText) {
     const text = (labelText || '').toLowerCase();
     if (!text) return false;
@@ -10260,6 +10690,7 @@
     return text.includes('page') && text.includes('url');
   }
 
+  // Automatically activates the "View by Page URL" radio before bulk actions.
   async function ensureIssuesViewByPage() {
     if (pageContext !== 'issues') return;
     logQuickActions('ensureIssuesViewByPage: verifying active view radio');
@@ -10274,6 +10705,7 @@
     await waitForIssuesResultsIdle();
   }
 
+  // Gathers the radio inputs that control the Pages list view (URL vs filters).
   function getPagesViewByRadios() {
     const buckets = new Set();
     const label = document.querySelector('#pages-view-by');
@@ -10298,6 +10730,7 @@
     }));
   }
 
+  // Switch Pages tab to show Page URL values so we can read them reliably.
   async function ensurePagesViewByUrl() {
     if (pageContext !== 'pages') return;
     const radios = getPagesViewByRadios();
@@ -10316,6 +10749,7 @@
     await waitForPagesTableChange(signature);
   }
 
+  // Some operations require Select All to be unchecked; enforce that state here.
   async function ensureSelectAllUnchecked() {
     if (pageContext !== 'issues') return;
     const selectAll = document.querySelector(issuesSelectAllSelector);
@@ -10329,12 +10763,14 @@
     await wait(50);
   }
 
+  // Returns the first button matching the Issues page Filters trigger.
   function getIssuesFilterButton() {
     return document.querySelector(issuesFilterButtonSelector) ||
       document.querySelector('#main-content button[aria-label="Filters"]') ||
       document.querySelector('#main-content button[data-test="filters-button"]');
   }
 
+  // Waits for the Filters button to appear (optionally requiring it to be enabled).
   async function waitForIssuesFilterButton({ timeout = 8000, requireEnabled = false } = {}) {
     return waitForCondition(() => {
       const button = getIssuesFilterButton();
@@ -10344,6 +10780,7 @@
     }, { timeout }).catch(() => null);
   }
 
+  // Opens the Issues Filters dialog, respecting whether the button must be enabled.
   async function openIssuesFilterModal({ ensureButtonEnabled = true } = {}) {
     const existing = document.querySelector(issuesFilterModalSelector);
     if (existing) return existing;
@@ -10361,6 +10798,8 @@
     return modal;
   }
 
+  // Applies the Page URL filter to the Issues table and waits for the results to
+  // refresh.
   async function applyIssuesPageUrlFilter(rawValue, { matchType = 'contains' } = {}) {
     const targetValue = rawValue == null ? '' : String(rawValue);
     const modal = await openIssuesFilterModal({ ensureButtonEnabled: true });
@@ -10394,6 +10833,7 @@
     return targetValue;
   }
 
+  // Convenience wrapper to clear the Page URL filter via applyIssuesPageUrlFilter.
   async function clearIssuesPageUrlFilter() {
     try {
       await applyIssuesPageUrlFilter('', { matchType: 'contains' });
@@ -10403,6 +10843,7 @@
     }
   }
 
+  // Attempts several selectors/labels to locate the "Clear filters" control.
   function findClearFiltersButton(modal) {
     if (!modal) return null;
     const selectors = [
@@ -10423,6 +10864,8 @@
     }) || null;
   }
 
+  // Clicks the Clear Filters action and confirms it, restoring the issues table
+  // to an unfiltered state.
   async function clearAllIssuesFilters() {
     if (pageContext !== 'issues') return;
     try {
@@ -10455,6 +10898,8 @@
     }
   }
 
+  // Drives the Issues UI to load the "Assign to" dropdown so we can capture the
+  // available assignee list for quick actions.
   async function collectQuickAssignOptions() {
     if (pageContext !== 'issues') return [];
     logQuickActions('collectQuickAssignOptions: start');
@@ -10571,6 +11016,7 @@
     return optionDedup;
   }
 
+  // Memoized accessor for collectQuickAssignOptions so we only drive the UI once.
   async function ensureQuickAssignOptions() {
     if (quickAssignOptionsCache && quickAssignOptionsCache.length) {
       return quickAssignOptionsCache.slice();
@@ -10589,6 +11035,8 @@
     return quickAssignOptionsPromise;
   }
 
+  // Busy-waits until the Issues table reports aria-busy=false and no spinner is
+  // visible, signaling render completion.
   async function waitForIssuesResultsIdle(timeout = 8000) {
     const container =
       document.querySelector('#main-content section.Panel__Content') ||
@@ -10617,6 +11065,8 @@
     });
   }
 
+  // Builds the textarea-based modal used for pasting bulk page URLs for
+  // assignment.
   function openQuickAssignPagesModal(initialEntries, { onSave } = {}) {
     const startingValue = Array.isArray(initialEntries) ? initialEntries.join('\n') : String(initialEntries || '');
     const overlay = document.createElement('div');
@@ -10753,6 +11203,7 @@
     textarea.focus();
   }
 
+  // Runs an action that changes tabular data then waits for a signature change.
   async function performTableUpdate(action, { getSignature = getTableSignature, waitForChange } = {}) {
     const prevSignature = getSignature();
     action();
@@ -10763,11 +11214,14 @@
     }
   }
 
+  // Guard for pagination buttons that may use aria-disabled instead of disabled.
   function isButtonDisabled(btn) {
     if (!btn) return true;
     return btn.disabled || btn.getAttribute('aria-disabled') === 'true';
   }
 
+  // Sets the table page size to the largest available value so pagination is
+  // minimized before scraping.
   async function ensurePageSize(select, options = {}) {
     if (!select) return;
     const desired = Array.from(select.options)
@@ -10783,6 +11237,7 @@
     }, options);
   }
 
+  // Navigates to the first page of the table using the pagination controls.
   async function goToFirstPage(pagination, options = {}) {
     if (!pagination) return false;
     const firstBtn =
@@ -10793,6 +11248,7 @@
     return true;
   }
 
+  // Advances to the next table page, returning false once we hit the end.
   async function goToNextPage(pagination, options = {}) {
     if (!pagination) return false;
     const nextBtn =
@@ -10803,6 +11259,8 @@
     return true;
   }
 
+  // Walks every page of the scans table, making sure we always start/end on the
+  // first page, and invokes processPage for each view.
   async function iterateAllPages(processPage) {
     const table = findScansTable();
     if (!table) throw new Error('Scan table not found.');
@@ -14482,6 +14940,7 @@
     }
   }
 
+  // Uses the Monitor API to find the latest completed run for a scan.
   async function fetchLatestCompletedRunForScan(scanId, { signal } = {}) {
     if (!scanId) throw new Error('Missing scan id.');
     const payload = await fetchWasApi(`/scans/${scanId}/runs?needsReview=false`, { signal });
@@ -14500,6 +14959,7 @@
     return target;
   }
 
+  // Streams page records for a given run, respecting configured page limits.
   async function fetchPagesForRun(scanId, runNumber, { signal, limit = pageHealthMaxPagesPerScan } = {}) {
     if (!scanId || runNumber == null) throw new Error('Missing scan id or run number.');
     const records = [];
@@ -14538,6 +14998,7 @@
     return { records, truncated };
   }
 
+  // Extracts a pages array from whichever shape the API response used.
   function getPagesArrayFromPayload(payload) {
     if (!payload) return [];
     if (Array.isArray(payload.pages)) return payload.pages;
@@ -14547,6 +15008,7 @@
     return [];
   }
 
+  // Similar helper for issue collections in Monitor API payloads.
   function getIssuesArrayFromPayload(payload) {
     if (!payload) return [];
     if (Array.isArray(payload.issues)) return payload.issues;
@@ -14556,6 +15018,7 @@
     return [];
   }
 
+  // Normalizes pagination metadata regardless of the API casing/shape.
   function derivePaginationMeta(payload) {
     const meta = payload?.pagination || payload?.meta?.pagination || {};
     const currentPage = meta.currentPage ?? meta.page ?? null;
@@ -14574,6 +15037,7 @@
     };
   }
 
+  // Saves a sample record so we can later show discovered fields to the user.
   function recordPageHealthDiscovery(sample) {
     if (!sample || pageHealthState.discovery.verified) return;
     pageHealthState.discovery = {
@@ -14585,6 +15049,7 @@
     logPageHealth('Page details API shape confirmed', pageHealthState.discovery.sampleKeys);
   }
 
+  // Converts a raw page record plus scan metadata into the normalized shape.
   function mapPageHealthRecord(record, row, runMeta) {
     const pick = (...keys) => {
       for (const key of keys) {
@@ -14625,6 +15090,7 @@
     return base;
   }
 
+  // Iterates every page of the Pages table and returns a deduped list of URLs.
   async function collectAllPageUrls() {
     if (pageContext !== 'pages') throw new Error('Copying URLs is only available on the Pages view.');
     await ensurePagesViewByUrl();
@@ -14672,6 +15138,7 @@
     return urls;
   }
 
+  // UI section that lets users collect and copy all Page URLs from the table.
   function buildCopyPageUrlsSection() {
     if (pageContext !== 'pages') return null;
     const details = document.createElement('details');
@@ -15595,7 +16062,8 @@
       }
     });
 
-    function updateManualLineNumbers() {
+  // Keeps the gutter line numbers synchronized with the textarea content.
+  function updateManualLineNumbers() {
       const lines = manualTextarea.value.split('\n').length || 1;
       const styles = window.getComputedStyle(manualTextarea);
       const parsedLineHeight = parseFloat(styles.lineHeight);
@@ -15626,14 +16094,16 @@
     });
     updateManualLineNumbers();
 
-    function parseManualEntries() {
+  // Splits the textarea into trimmed filename entries.
+  function parseManualEntries() {
       return manualTextarea.value
         .split(/\r?\n/)
         .map(line => line.trim())
         .filter(Boolean);
     }
 
-    function renderManualState() {
+  // Refreshes manual matching UI elements (status, tables, buttons).
+  function renderManualState() {
       if (manualState.status === 'matching') {
         manualStatus.textContent = 'Matching…';
       } else if (manualState.status === 'completed') {
@@ -15677,7 +16147,8 @@
     }
     renderManualState();
 
-    async function matchManualList() {
+  // Matches user-provided filenames against currently loaded PDF URLs.
+  async function matchManualList() {
       const entries = parseManualEntries();
       if (!entries.length) {
         manualState.status = 'error';
@@ -15737,6 +16208,7 @@
     return container;
   }
 
+  // Creates a reusable quick-action accordion section driven by the provided config.
   function buildPageAutomationSection(config) {
     if (pageContext !== 'issues') return null;
     const {
@@ -16447,6 +16919,7 @@
     return details;
   }
 
+  // Quick action that bulk assigns issues based on a saved list of pages.
   function buildAssignIssuesSection() {
     return buildPageAutomationSection({
       id: 'assign',
@@ -16519,6 +16992,7 @@
     });
   }
 
+  // Quick action that sets selected issues to "Ignored" for each saved page.
   function buildIgnoreIssuesSection() {
     return buildPageAutomationSection({
       id: 'ignore',
@@ -16536,6 +17010,7 @@
     });
   }
 
+  // Quick action that marks issues as "Open" page by page.
   function buildMarkIssuesSection() {
     return buildPageAutomationSection({
       id: 'mark-open',
@@ -16554,6 +17029,7 @@
     });
   }
 
+  // Kicks off fetching WAS metrics for the selected reports and updates the UI.
   async function handleWasLoad(rowLookup, container, button) {
     if (wasDataCache.status === 'loading') {
       logWas('Load request ignored because a previous load is still running');
@@ -16628,6 +17104,7 @@
     }
   }
 
+  // Renders the WAS metrics table along with a CSV download button and timestamp.
   function renderWasTable(container, data, timestamp) {
     container.innerHTML = '';
     if (!Array.isArray(data) || !data.length) {
@@ -16690,6 +17167,7 @@
     }
   }
 
+  // Formats a single WAS metric cell, returning em dash for missing values.
   function formatWasCell(group, key) {
     if (!group) return '—';
     if (group.error) return group.error;
@@ -16697,6 +17175,7 @@
     return Number.isFinite(value) ? String(value) : '—';
   }
 
+  // Convenience wrapper for PDF-specific WAS counts.
   function formatPdfCell(group) {
     if (!group) return '—';
     if (group.error) return group.error;
@@ -16707,6 +17186,7 @@
   const wasWaitStatusTokens = ['queued','queue','pending','inprogress','progress','running'];
   const wasRerunStatusTokens = ['cancel','initial','notstarted','stopped'];
 
+  // Generates status helper text for each WAS device type (desktop/mobile/pdf).
   function buildWasStatusNotes(record) {
     const fragment = document.createDocumentFragment();
     let found = false;
@@ -16747,6 +17227,7 @@
     return fragment;
   }
 
+  // Lightweight confirm dialog used before running expensive operations.
   function openSimpleDialog({ title, message, primaryLabel = 'OK', secondaryLabel = 'Cancel' }) {
     return new Promise(resolve => {
       const overlay = document.createElement('div');
@@ -16807,6 +17288,7 @@
     });
   }
 
+  // Settings modal that lets users store local API keys and preferences.
   function openSettingsDialog({ focusField = 'apiKey' } = {}) {
     return new Promise((resolve, reject) => {
       try {
@@ -16900,6 +17382,7 @@
     });
   }
 
+  // Modal UI for customizing the priority order used in ranking tables.
   function openRankingDialog(triggerButton) {
     if (rankingState.dialog) {
       rankingState.dialog.focus();
@@ -17300,6 +17783,7 @@
     });
   }
 
+  // Simple progress modal that exposes update/cancel hooks.
   function openProgressDialog({ title, initialMessage = '' }) {
     const overlay = document.createElement('div');
     overlay.className = 'a11y-filter-overlay';
@@ -17364,6 +17848,7 @@
     };
   }
 
+  // Editor dialog for mapping WAS reports to Monitor scans/domains.
   function openWasConfigModal(rowLookup) {
     return new Promise(resolve => {
       const overlay = document.createElement('div');
@@ -17510,6 +17995,7 @@
     });
   }
 
+  // Populates the modal footer with refresh controls and API status chips.
   function renderRefreshFooter(footer, now, body, updateFilterButtonLabel) {
     if (!footer) return;
     footer.innerHTML = '';
@@ -17565,6 +18051,7 @@
 
   // --- Filter modal ---
 
+  // Dedicated filters dialog for narrowing the scan summary dataset.
   function openFilterModal(parentDialog, bodyEl, footerEl, data, updateFilterButtonLabel) {
     const { typeOptions, domainOptions, statusOptions } = data;
     logWidget('openFilterModal start', {
@@ -18104,6 +18591,7 @@
 
   // --- Main modal ---
 
+  // Main entry point for launching the scans summary / quick actions modal.
   async function openModal(triggerButton, { mode = pageContext } = {}) {
     const dialogMode = mode || pageContext;
     const isScansDialog = dialogMode === 'scans';
@@ -18269,7 +18757,8 @@
     const footer = document.createElement('div');
     footer.className = 'a11y-scan-report-footer';
 
-    const minimizeBtn = document.createElement('button');
+  // Header action buttons allow users to minimize, open settings, or close the modal entirely.
+  const minimizeBtn = document.createElement('button');
     minimizeBtn.type = 'button';
     minimizeBtn.className = 'a11y-scan-report-minimize';
     minimizeBtn.textContent = 'Minimize';
