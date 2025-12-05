@@ -1,17 +1,2070 @@
 (function () {
   const isDequeHost = location.hostname.endsWith('dequecloud.com');
+  const scanInsightsTabs = [
+    { key: 'scoreTrend', label: 'Score Trend' },
+    { key: 'health', label: 'Health & trend' },
+    { key: 'progress', label: 'Progress & remediation' },
+    { key: 'coverage', label: 'Coverage & pages' }
+  ];
+  const scanInsightsIssueLimit = 1000;
+  const scanInsightsIssuePageSize = 200;
+  const scanInsightsPageLimit = 400;
+  const scanInsightsPagePageSize = 100;
+  const scanInsightsIssueWeights = {
+    critical: 5,
+    serious: 3,
+    moderate: 1,
+    minor: 0.5,
+    needsReview: 0
+  };
+  const enablePageSummaryApiForMetrics = false;
+  const scanInsightsState = {
+    context: null,
+    trigger: null,
+    dialog: null,
+    activeTab: scanInsightsTabs[0].key,
+    tabButtons: [],
+    panels: new Map(),
+    subtitleEl: null,
+    filterButton: null,
+    status: 'idle',
+    error: '',
+    data: null,
+    abortController: null,
+    loadPromise: null,
+    tabCache: createScanInsightsTabCache(),
+    pageCountPromise: null,
+    pageCountAbortController: null,
+    runHistoryScrapePromise: null
+  };
+
+  const runPageSummaryCache = new Map();
+  const runPageSummaryConcurrency = 1;
+  const scanInsightsDebugState = {
+    pagesWithIssues: new Map()
+  };
+
+  function createScanInsightsTabCache() {
+    return {
+      progress: createScanInsightsTabState(),
+      coverage: createScanInsightsTabState()
+    };
+  }
+
+  function logScanInsightsDebug(message, details) {
+    if (typeof console !== 'object') return;
+    const logger = console.debug || console.log;
+    if (typeof logger !== 'function') return;
+    if (details !== undefined) {
+      try {
+        logger.call(console, '[ScanInsights]', message, details);
+      } catch (err) {
+        // ignore logging failures
+      }
+    } else {
+      try {
+        logger.call(console, '[ScanInsights]', message);
+      } catch (err) {
+        // ignore logging failures
+      }
+    }
+  }
+
+  function getRunDebugKey(run) {
+    if (!run) return null;
+    if (run.runNumber != null) return `run-${run.runNumber}`;
+    if (run.raw?.runNumber != null) return `raw-${run.raw?.runNumber}`;
+    if (run.startedLabel) return `label-${run.startedLabel}`;
+    return null;
+  }
+
+  function logPagesWithIssuesResolution(run, source, value, context = {}) {
+    const key = getRunDebugKey(run);
+    const payload = {
+      runNumber: run?.runNumber ?? run?.raw?.runNumber ?? null,
+      source,
+      value,
+      ...context
+    };
+    if (key) {
+      const previous = scanInsightsDebugState.pagesWithIssues.get(key);
+      if (previous && previous.value === value && previous.source === source) {
+        return;
+      }
+      scanInsightsDebugState.pagesWithIssues.set(key, { value, source });
+    }
+    logScanInsightsDebug('Pages with issues derived', payload);
+  }
+
+  function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, Math.max(0, ms || 0)));
+  }
+
+  function isRateLimitError(error) {
+    const message = String(error?.message || '').toLowerCase();
+    return message.includes('api 429') || message.includes('too many requests');
+  }
+
+  function isElementVisible(element) {
+    if (!element) return false;
+    return Boolean(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
+  }
+
+  function parseCompactNumber(text) {
+    if (!text) return null;
+    const normalized = String(text).trim().toLowerCase().replace(/,/g, '');
+    if (!normalized) return null;
+    const match = normalized.match(/^(-?\d+(?:\.\d+)?)([kmb])?$/i);
+    if (!match) {
+      const asNum = Number(normalized);
+      return Number.isFinite(asNum) ? asNum : null;
+    }
+    const value = parseFloat(match[1]);
+    if (!Number.isFinite(value)) return null;
+    const suffix = (match[2] || '').toLowerCase();
+    const multipliers = { k: 1e3, m: 1e6, b: 1e9 };
+    const multiplier = multipliers[suffix] || 1;
+    return value * multiplier;
+  }
+
+  function findRunHistoryTriggerElement() {
+    return document.querySelector('[data-testid="scan-history-runs-trigger"]');
+  }
+
+  function getRunPageCountPanel() {
+    const headings = Array.from(document.querySelectorAll('.Panel__Header h2, .Panel__Header h3'));
+    const heading = headings.find(node => node.textContent && node.textContent.trim().toLowerCase() === 'run page count');
+    return heading ? heading.closest('.Panel') : null;
+  }
+
+  function readRunPageCountMetric(panel, labelId) {
+    if (!panel) return null;
+    const label = panel.querySelector(`#${labelId}`);
+    if (!label) return null;
+    const wrapper = label.parentElement;
+    if (!wrapper) return null;
+    const valueNode = wrapper.querySelector('a, span, strong');
+    if (!valueNode) return null;
+    const text = valueNode.textContent?.trim() || '';
+    const value = parseCompactNumber(text);
+    return { text, value };
+  }
+
+  function readRunPageCountValues() {
+    const panel = getRunPageCountPanel();
+    if (!panel) return null;
+    const scanned = readRunPageCountMetric(panel, 'pages-count-pages_scanned');
+    const withIssues = readRunPageCountMetric(panel, 'pages-count-pages_with_issues');
+    const withoutIssues = readRunPageCountMetric(panel, 'pages-count-pages_with_no_issues');
+    const criticalIssues = readRunPageCountMetric(panel, 'pages-count-pages_with_critical_issues');
+    if (!scanned && !withIssues && !withoutIssues && !criticalIssues) return null;
+    return {
+      scanned: scanned?.value ?? null,
+      scannedText: scanned?.text || '',
+      withIssues: withIssues?.value ?? null,
+      withIssuesText: withIssues?.text || '',
+      withoutIssues: withoutIssues?.value ?? null,
+      withoutIssuesText: withoutIssues?.text || '',
+      criticalIssues: criticalIssues?.value ?? null,
+      criticalIssuesText: criticalIssues?.text || ''
+    };
+  }
+
+  function areRunPageCountSnapshotsEqual(a, b) {
+    if (!a && !b) return true;
+    if (!a || !b) return false;
+    const keys = [
+      'scanned',
+      'scannedText',
+      'withIssues',
+      'withIssuesText',
+      'withoutIssues',
+      'withoutIssuesText',
+      'criticalIssues',
+      'criticalIssuesText'
+    ];
+    return keys.every(key => {
+      const left = a[key] ?? null;
+      const right = b[key] ?? null;
+      return left === right;
+    });
+  }
+
+  function findRunHistoryMenuElement(trigger) {
+    if (!trigger) return null;
+    const menuId = trigger.getAttribute('aria-controls');
+    if (menuId) {
+      const byId = document.getElementById(menuId);
+      if (byId) {
+        if (byId.matches('ul.ActionList, [role="menu"]')) return byId;
+        const list = byId.querySelector('ul.ActionList, [role="menu"]');
+        if (list) return list;
+        return byId;
+      }
+    }
+    const triggerId = trigger.id;
+    if (triggerId) {
+      const labelled = document.querySelector(`[aria-labelledby="${triggerId}"]`);
+      if (labelled) {
+        if (labelled.matches('ul.ActionList, [role="menu"]')) return labelled;
+        const list = labelled.querySelector('ul.ActionList, [role="menu"]');
+        if (list) return list;
+        return labelled;
+      }
+    }
+    const siblingActionMenu = trigger.closest('.Panel__Header, .ActionMenu, body')?.querySelector(
+      '.ActionMenu .ActionList[role="menu"], .ActionMenu [role="menu"], ul.ActionList[role="menu"]'
+    );
+    if (siblingActionMenu) return siblingActionMenu;
+    const fallback = document.querySelector('[data-testid="scan-history-runs-menu"], ul.ActionList[role="menu"]');
+    return fallback || null;
+  }
+
+  function isRunHistoryMenuUsable(menu) {
+    if (!menu) return false;
+    if (isElementVisible(menu)) return true;
+    const ariaHidden = menu.getAttribute('aria-hidden');
+    const itemCount = menu.querySelectorAll('li.ActionListItem').length;
+    if (itemCount > 0 && ariaHidden === 'false') {
+      return true;
+    }
+    return itemCount > 0;
+  }
+
+  async function ensureRunHistoryMenuVisible(trigger, { timeoutMs = 2500 } = {}) {
+    if (!trigger) return null;
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const menu = findRunHistoryMenuElement(trigger);
+      if (isRunHistoryMenuUsable(menu)) {
+        if (!isElementVisible(menu)) {
+          logScanInsightsDebug('Run history menu rendered offscreen; using hidden menu snapshot', {
+            ariaHidden: menu?.getAttribute('aria-hidden') ?? null,
+            itemCount: menu ? menu.querySelectorAll('li.ActionListItem').length : 0
+          });
+        }
+        return menu;
+      }
+      if (trigger.getAttribute('aria-expanded') !== 'true') {
+        try {
+          trigger.click();
+        } catch (err) {
+          console.warn('Unable to expand run history trigger', err);
+        }
+      }
+      await delay(50);
+    }
+    const menu = findRunHistoryMenuElement(trigger);
+    return menu && isElementVisible(menu) ? menu : null;
+  }
+
+  function getRunHistoryMenuActionTarget(item) {
+    if (!item) return null;
+    return (
+      item.querySelector('button') ||
+      item.querySelector('[role="menuitemradio"], [role="menuitem"]') ||
+      item.querySelector('[data-testid="action-list-item"]') ||
+      item
+    );
+  }
+
+  function activateRunHistoryMenuAction(item) {
+    const actionTarget = getRunHistoryMenuActionTarget(item);
+    if (!actionTarget) return false;
+    if (typeof PointerEvent === 'function') {
+      try {
+        actionTarget.dispatchEvent(
+          new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse' })
+        );
+      } catch (err) {
+        // ignore pointer issues
+      }
+    }
+    try {
+      actionTarget.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+      );
+    } catch (err) {
+      // ignore mouse issues
+    }
+    try {
+      actionTarget.click();
+    } catch (err) {
+      console.warn('Unable to activate run history menu action', err);
+      return false;
+    }
+    try {
+      actionTarget.dispatchEvent(
+        new MouseEvent('mouseup', { bubbles: true, cancelable: true })
+      );
+    } catch (err) {
+      // ignore mouse issues
+    }
+    if (typeof PointerEvent === 'function') {
+      try {
+        actionTarget.dispatchEvent(
+          new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse' })
+        );
+      } catch (err) {
+        // ignore pointer issues
+      }
+    }
+    return true;
+  }
+
+  async function waitForRunHistorySelectionEffect(target, { timeoutMs = 1200 } = {}) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (!document.contains(target)) {
+        return true;
+      }
+      if (target.getAttribute('aria-checked') === 'true') {
+        return true;
+      }
+      await delay(50);
+    }
+    return target.getAttribute('aria-checked') === 'true';
+  }
+
+  async function selectRunHistoryMenuEntryByIndex(index, { timeoutMs = 2500 } = {}) {
+    const trigger = findRunHistoryTriggerElement();
+    if (!trigger) return false;
+    const menu = await ensureRunHistoryMenuVisible(trigger, { timeoutMs });
+    if (!menu) return false;
+    const items = Array.from(menu.querySelectorAll('li.ActionListItem[aria-disabled="false"]'));
+    const target = items[index];
+    if (!target) return false;
+    const alreadySelected = target.getAttribute('aria-checked') === 'true';
+    if (alreadySelected) {
+      return true;
+    }
+    const activated = activateRunHistoryMenuAction(target);
+    if (!activated) {
+      return false;
+    }
+    const waited = await waitForRunHistorySelectionEffect(target, { timeoutMs: 1500 });
+    if (!waited) {
+      logScanInsightsDebug('Run history menu entry activation timed out', {
+        index,
+        timeoutMs
+      });
+    } else {
+      logScanInsightsDebug('Run history menu entry activated', {
+        index
+      });
+    }
+    return true;
+  }
+
+  async function waitForRunPageCountUpdate(previousSnapshot, { timeoutMs = 4000 } = {}) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const current = readRunPageCountValues();
+      if (current && !areRunPageCountSnapshotsEqual(previousSnapshot, current)) {
+        return current;
+      }
+      await delay(100);
+    }
+    return readRunPageCountValues();
+  }
+
+  function parseRunHistoryMenuItem(item) {
+    if (!item) return null;
+    const timestampLabel = item.querySelector('.ActionListItem__label .e0d9b8fb07d0')?.textContent?.trim() || '';
+    const statsSpans = Array.from(item.querySelectorAll('.ActionListItem__label .ae3b36f264e4 .weight--medium'));
+    const completedPagesText = statsSpans[0]?.textContent?.trim() || '';
+    const issuesText = statsSpans[1]?.textContent?.trim() || '';
+    const completedPages = parseCompactNumber(completedPagesText);
+    const totalIssues = parseCompactNumber(issuesText);
+    if (!timestampLabel && completedPages == null && totalIssues == null) {
+      return null;
+    }
+    const entry = {
+      timestampLabel,
+      completedPages,
+      totalIssues,
+      completedPagesText,
+      issuesText
+    };
+    logScanInsightsDebug('Parsed run history menu entry', entry);
+    return entry;
+  }
+
+  async function collectRunHistoryMenuEntries({ limit = 3, timeoutMs = 2500 } = {}) {
+    if (!isScanDetailPage) return [];
+    const trigger = findRunHistoryTriggerElement();
+    if (!trigger) {
+      logScanInsightsDebug('Run history trigger not found; skipping UI scrape');
+      return [];
+    }
+    const menu = await ensureRunHistoryMenuVisible(trigger, { timeoutMs });
+    if (!menu) {
+      const fallbackMenu = findRunHistoryMenuElement(trigger);
+      logScanInsightsDebug('Run history menu not visible; skipping UI scrape', {
+        timeoutMs,
+        expanded: trigger.getAttribute('aria-expanded'),
+        menuExists: Boolean(fallbackMenu),
+        ariaHidden: fallbackMenu?.getAttribute('aria-hidden') ?? null,
+        itemCount: fallbackMenu ? fallbackMenu.querySelectorAll('li.ActionListItem').length : 0
+      });
+      return [];
+    }
+    logScanInsightsDebug('Run history menu located for scraping', {
+      limit,
+      timeoutMs,
+      expanded: trigger.getAttribute('aria-expanded'),
+      menuId: menu?.id || null,
+      ariaHidden: menu?.getAttribute('aria-hidden') ?? null,
+      itemCount: menu ? menu.querySelectorAll('li.ActionListItem').length : 0
+    });
+    const items = Array.from(menu.querySelectorAll('li.ActionListItem[aria-disabled="false"]'));
+    return items
+      .slice(0, Math.max(1, limit))
+      .map(item => parseRunHistoryMenuItem(item))
+      .filter(Boolean);
+  }
+
+  function createScanInsightsTabState() {
+    return {
+      status: 'idle',
+      error: '',
+      data: null,
+      key: null,
+      promise: null,
+      controller: null
+    };
+  }
+
+  function getScanInsightsTabState(tabKey) {
+    if (!scanInsightsState.tabCache) {
+      scanInsightsState.tabCache = createScanInsightsTabCache();
+    }
+    return scanInsightsState.tabCache[tabKey];
+  }
+
   const isScansListPage = isDequeHost && location.pathname === '/monitor/scans';
   const isPagesListPage = isDequeHost && location.pathname === '/monitor/pages';
   const isIssuesQuickActionsPage =
     isDequeHost &&
     location.pathname === '/monitor/issues' &&
     /\bscanRun=/.test(location.search || '');
-  if (!isScansListPage && !isIssuesQuickActionsPage && !isPagesListPage) {
+  const scanDetailMatch =
+    isDequeHost && location.pathname.startsWith('/monitor/scans/')
+      ? location.pathname.match(/^\/monitor\/scans\/(\d+)(?:\/|$)/)
+      : null;
+  const isScanDetailPage = Boolean(scanDetailMatch);
+  const isSupportedPage =
+    isScansListPage || isIssuesQuickActionsPage || isPagesListPage || isScanDetailPage;
+
+  if (!isSupportedPage) {
     console.log(
       'A11y Scan Summary: Not on a supported Monitor page; widget not injected.'
     );
     return;
   }
+
+  function buildScanInsightsPreface(tabKey) {
+    const wrapper = document.createElement('p');
+    wrapper.className = 'a11y-scan-insights-placeholder';
+    const { scanId, runNumber } = scanInsightsState.context || {};
+    const runLabel = runNumber != null ? `run ${runNumber}` : 'latest run';
+    if (tabKey === 'scoreTrend') {
+      wrapper.textContent = `Score trend insights will summarize every available run for scan ${scanId || ''}.`;
+    } else if (tabKey === 'progress') {
+      wrapper.textContent = `Progress & remediation data will compare ${runLabel} with the previous run once analytics are available.`;
+    } else if (tabKey === 'coverage') {
+      wrapper.textContent = `Coverage & pages summaries will display page-level health information for scan ${scanId || ''}.`;
+    } else {
+      wrapper.textContent = `Health & trend charts will load for scan ${scanId || ''} (${runLabel}).`;
+    }
+    return wrapper;
+  }
+
+  function buildScanInsightsLoadingView(message = 'Loading scan insights…') {
+    const container = document.createElement('div');
+    container.className = 'a11y-scan-insights-loading';
+    const spinner = document.createElement('div');
+    spinner.className = 'a11y-scan-insights-spinner';
+    spinner.setAttribute('aria-hidden','true');
+    const text = document.createElement('p');
+    text.textContent = message;
+    container.appendChild(spinner);
+    container.appendChild(text);
+    return container;
+  }
+
+  function buildScanInsightsErrorView(message, { onRetry } = {}) {
+    const container = document.createElement('div');
+    container.className = 'a11y-scan-insights-error';
+    const text = document.createElement('p');
+    text.textContent = message || 'Unable to load scan insights.';
+    container.appendChild(text);
+    const actions = document.createElement('div');
+    actions.className = 'a11y-scan-insights-error-actions';
+    const retryBtn = document.createElement('button');
+    retryBtn.type = 'button';
+    retryBtn.className = 'a11y-btn-secondary';
+    retryBtn.textContent = 'Retry';
+    retryBtn.addEventListener('click', () => {
+      if (typeof onRetry === 'function') {
+        onRetry();
+      } else {
+        retryScanInsightsLoad();
+      }
+    });
+    actions.appendChild(retryBtn);
+    container.appendChild(actions);
+    return container;
+  }
+
+  function retryScanInsightsLoad() {
+    resetScanInsightsData();
+    renderScanInsightsTabContent(scanInsightsState.activeTab);
+    ensureScanInsightsData().catch(err => console.warn('Scan insights reload failed', err));
+  }
+
+  function renderScanInsightsHealthTab(target, data) {
+    const runs = data?.completedRuns;
+    if (!runs || !runs.length) {
+      target.appendChild(buildScanInsightsPreface('health'));
+      return;
+    }
+    const recentRuns = sliceRecentRuns(runs, 3);
+    target.appendChild(buildScoreTrendSection(recentRuns));
+    target.appendChild(buildIssuesImpactSection(recentRuns));
+    target.appendChild(buildWeightedDensitySection(recentRuns));
+    target.appendChild(buildHighImpactDeltaSection(data.latest, data.previous));
+  }
+
+  function renderScanInsightsProgressTab(target, data) {
+    if (!data?.previous) {
+      const msg = document.createElement('p');
+      msg.className = 'a11y-scan-insights-placeholder';
+      msg.textContent = 'At least two completed runs are required to show progress insights.';
+      target.appendChild(msg);
+      return;
+    }
+    const tab = getScanInsightsTabState('progress');
+    const table = buildDeltaTable(data.latest, data.previous);
+    target.appendChild(buildScanInsightsSection('Run-over-run comparison', table));
+    if (tab.status === 'loading') {
+      target.appendChild(buildScanInsightsLoadingView('Comparing latest issues with the previous run…'));
+      return;
+    }
+    if (tab.status === 'error') {
+      target.appendChild(
+        buildScanInsightsErrorView(tab.error || 'Unable to load progress details.', {
+          onRetry: () => ensureProgressInsightsDetails().catch(err => console.warn('Progress insights reload failed', err))
+        })
+      );
+      return;
+    }
+    if (tab.status !== 'ready' || !tab.data) {
+      target.appendChild(buildScanInsightsPreface('progress'));
+      ensureProgressInsightsDetails().catch(err => console.warn('Progress insights load failed', err));
+      return;
+    }
+    target.appendChild(buildIssueChurnSection(tab.data));
+    target.appendChild(
+      buildRuleDeltaSection('Rules with regressions', tab.data.diff?.ruleRegressions?.slice(0, 5) || [], {
+        emptyMessage: 'No regressions detected between the two runs.'
+      })
+    );
+    target.appendChild(
+      buildRuleDeltaSection('Rules resolved', tab.data.diff?.ruleRemediations?.slice(0, 5) || [], {
+        emptyMessage: 'No resolved rules detected.',
+        intent: 'positive'
+      })
+    );
+    target.appendChild(buildPageDeltaSection(tab.data));
+  }
+
+  function renderScanInsightsCoverageTab(target, data) {
+    const latest = data?.latest;
+    if (!latest) {
+      target.appendChild(buildScanInsightsPreface('coverage'));
+      return;
+    }
+    const tab = getScanInsightsTabState('coverage');
+    const baseSections = [
+      buildScanInsightsSection('Page coverage by severity', buildCoverageGrid(latest)),
+      buildScanInsightsSection('Run details', buildRunMetaList(latest))
+    ];
+    baseSections.forEach(section => target.appendChild(section));
+    if (tab.status === 'loading') {
+      target.appendChild(buildScanInsightsLoadingView('Analyzing page-level coverage…'));
+      return;
+    }
+    if (tab.status === 'error') {
+      target.appendChild(
+        buildScanInsightsErrorView(tab.error || 'Unable to load page coverage details.', {
+          onRetry: () => ensureCoverageInsightsDetails().catch(err => console.warn('Coverage insights reload failed', err))
+        })
+      );
+      return;
+    }
+    if (tab.status !== 'ready' || !tab.data) {
+      ensureCoverageInsightsDetails().catch(err => console.warn('Coverage insights load failed', err));
+      return;
+    }
+    target.appendChild(buildPageHealthSummarySection(tab.data.stats));
+    target.appendChild(buildTopPagesSection(tab.data));
+    target.appendChild(buildCleanPagesSection(tab.data));
+  }
+
+  function renderScanInsightsScoreTrendTab(target, data) {
+    const baseRuns = Array.isArray(data?.runs) && data.runs.length ? data.runs : data?.completedRuns || [];
+    const sortedRuns = sortRunsByCompletedAtAscending(baseRuns.filter(run => run && isRunCompleted(run)));
+    if (!sortedRuns.length) {
+      target.appendChild(buildScanInsightsPreface('scoreTrend'));
+      return;
+    }
+    const oldestRun = sortedRuns[0];
+    const newestRun = sortedRuns[sortedRuns.length - 1];
+    target.appendChild(buildScoreTrendKpiSection(oldestRun, newestRun));
+    target.appendChild(buildScoreTrendChartSection(sortedRuns, oldestRun, newestRun));
+    target.appendChild(buildScoreTrendTableSection(sortedRuns, newestRun));
+  }
+
+  function buildScoreTrendKpiSection(oldestRun, newestRun) {
+    const section = document.createElement('section');
+    section.className = 'a11y-scan-insights-section';
+    const heading = document.createElement('h3');
+    heading.textContent = 'Score trend snapshot';
+    section.appendChild(heading);
+    const grid = document.createElement('div');
+    grid.className = 'a11y-scan-insights-summary-grid';
+    const metricDefinitions = [
+      {
+        label: 'Accessibility score',
+        current: getScorePercent(newestRun),
+        previous: getScorePercent(oldestRun),
+        valueFormatter: value => Number.isFinite(value) ? `${value.toFixed(1)}%` : '—',
+        changeFormatter: delta => `${Math.abs(delta).toFixed(1)}%`,
+        preferLower: false
+      },
+      {
+        label: 'Total issues',
+        current: coerceNumber(newestRun?.totalIssues, Number.NaN),
+        previous: coerceNumber(oldestRun?.totalIssues, Number.NaN),
+        valueFormatter: formatNumberValue,
+        preferLower: true
+      },
+      {
+        label: 'Pages with issues',
+        current: calculatePagesWithIssues(newestRun),
+        previous: calculatePagesWithIssues(oldestRun),
+        valueFormatter: formatNumberValue,
+        preferLower: true
+      },
+      {
+        label: 'Pages with critical issues',
+        current: coerceNumber(newestRun?.pageCounts?.critical, Number.NaN),
+        previous: coerceNumber(oldestRun?.pageCounts?.critical, Number.NaN),
+        valueFormatter: formatNumberValue,
+        preferLower: true
+      }
+    ];
+    metricDefinitions.forEach(definition => {
+      grid.appendChild(createImpactSummaryCard(definition));
+    });
+    section.appendChild(grid);
+    return section;
+  }
+
+  function buildScoreTrendChartSection(runs, oldestRun, newestRun) {
+    const section = document.createElement('section');
+    section.className = 'a11y-scan-insights-section';
+    const headingId = createUniqueId('score-trend-chart');
+    const summaryId = createUniqueId('score-trend-summary');
+    const heading = document.createElement('h3');
+    heading.id = headingId;
+    heading.textContent = 'Accessibility score trend';
+    section.appendChild(heading);
+  const summary = document.createElement('p');
+    summary.id = summaryId;
+    summary.className = 'a11y-scan-insights-note';
+    summary.textContent = `Tracking ${runs.length} completed runs from ${formatDateOnlyLabel(oldestRun?.completedAt) || '—'} through ${formatDateOnlyLabel(newestRun?.completedAt) || '—'}. Latest ${formatRunLabel(newestRun)} scored ${formatScoreValue(getScorePercent(newestRun))}.`;
+    section.appendChild(summary);
+    const highlightRunNumber = newestRun?.runNumber ?? null;
+    const points = runs
+      .map(run => ({
+        label: formatRunLabel(run),
+        value: getScorePercent(run),
+        subtitle: formatDateTimeLabel(run?.completedAt) || 'Completion pending',
+        isCurrent: highlightRunNumber != null && run?.runNumber === highlightRunNumber
+      }))
+      .filter(point => Number.isFinite(point.value));
+    const newestScore = getScorePercent(newestRun);
+    const oldestScore = getScorePercent(oldestRun);
+    const color = Number.isFinite(newestScore) && Number.isFinite(oldestScore)
+      ? newestScore >= oldestScore
+        ? '#4fa630'
+        : '#d93251'
+      : 'var(--accent-primary)';
+    const values = points.map(point => Number(point.value)).filter(Number.isFinite);
+    const minScore = values.length ? Math.min(...values) : 0;
+    const maxScore = values.length ? Math.max(...values) : 100;
+    const padding = Math.max(2, (maxScore - minScore) * 0.1);
+    const figure = wrapChartWithFigure(
+      createLineChart(points, {
+        yMin: Math.max(0, minScore - padding),
+        yMax: Math.min(100, maxScore + padding),
+        color,
+        valueFormatter: value => (Number.isFinite(value) ? `${value.toFixed(1)}%` : '—'),
+        xLabel: 'Runs (oldest → newest)',
+        yLabel: 'Score (%)',
+        showPointLabels: true,
+        pointLabelFormatter: point =>
+          Number.isFinite(point?.value) ? `${Number(point.value).toFixed(1)}%` : '—'
+      }),
+      {
+        caption: 'Line chart showing accessibility score changes for every completed run in chronological order.'
+      }
+    );
+    const captionEl = figure.querySelector('figcaption');
+    const labelledBy = [headingId, summaryId, captionEl?.id].filter(Boolean).join(' ');
+    if (labelledBy) {
+      figure.setAttribute('aria-labelledby', labelledBy);
+    }
+    section.appendChild(figure);
+    return section;
+  }
+
+  function buildScoreTrendTableSection(runs, newestRun) {
+    const captionText = `Completed runs ordered from oldest to newest showing score, issue, and page metrics (${runs.length} total).`;
+    const table = buildRunTable(runs, [
+      { header: 'Run', getValue: run => formatRunLabel(run), isRowHeader: true },
+      { header: 'Completed', getValue: run => formatDateTimeLabel(run?.completedAt) || '—' },
+      { header: 'Score', getValue: run => formatScoreValue(getScorePercent(run)) },
+      { header: 'Total issues', getValue: run => formatNumberValue(run?.totalIssues) },
+      {
+        header: 'Pages scanned',
+        getValue: run =>
+          formatNumberValue(
+            coerceNumber(
+              run?.pageIssueSummary?.completedPages ?? run?.pageIssueSummary?.totalPages ?? run?.totalPages,
+              Number.NaN
+            )
+          )
+      },
+      { header: 'Pages with issues', getValue: run => formatNumberValue(calculatePagesWithIssues(run)) },
+      { header: 'Pages with critical issues', getValue: run => formatNumberValue(coerceNumber(run?.pageCounts?.critical, Number.NaN)) }
+    ], {
+      caption: captionText,
+      highlightRunNumber: newestRun?.runNumber ?? null
+    });
+    return buildScanInsightsSection('Run history details', table);
+  }
+
+  function buildScanInsightsSection(title, body) {
+    const section = document.createElement('section');
+    section.className = 'a11y-scan-insights-section';
+    const heading = document.createElement('h3');
+    heading.textContent = title;
+    section.appendChild(heading);
+    if (Array.isArray(body)) {
+      body.forEach(node => node && section.appendChild(node));
+    } else if (body) {
+      section.appendChild(body);
+    } else {
+      const empty = document.createElement('p');
+      empty.className = 'a11y-scan-insights-placeholder';
+      empty.textContent = 'No data available yet.';
+      section.appendChild(empty);
+    }
+    return section;
+  }
+
+  function buildScanInsightsNote(text) {
+    const note = document.createElement('p');
+    note.className = 'a11y-scan-insights-note';
+    note.textContent = text;
+    return note;
+  }
+
+  function buildIssueChurnSection(progressData) {
+    const totals = progressData?.diff?.totals || { newCount: 0, resolvedCount: 0, net: 0 };
+    const grid = document.createElement('div');
+    grid.className = 'a11y-scan-insights-summary-grid';
+    grid.appendChild(createMetricCard({ label: 'New issues', value: formatNumberValue(totals.newCount) }));
+    grid.appendChild(createMetricCard({ label: 'Resolved issues', value: formatNumberValue(totals.resolvedCount) }));
+    grid.appendChild(
+      createMetricCard({
+        label: 'Net change',
+        value: totals.net === 0 ? 'No change' : formatSignedValue(totals.net),
+        hint: 'Positive = more open issues'
+      })
+    );
+    const body = [grid];
+    if (progressData?.diff?.summaryByImpact) {
+      body.push(buildIssueSeverityTable(progressData.diff.summaryByImpact));
+    }
+    if (progressData?.comparedIssues?.truncatedLatest || progressData?.comparedIssues?.truncatedPrevious) {
+      body.push(
+        buildScanInsightsNote(
+          `Compared up to ${scanInsightsIssueLimit.toLocaleString()} issues per run. Totals may exceed what is shown.`
+        )
+      );
+    }
+    return buildScanInsightsSection('Issue churn since previous run', body);
+  }
+
+  function buildIssueSeverityTable(summary) {
+    const order = ['critical','serious','moderate','minor','needsReview'];
+    const table = document.createElement('table');
+    table.className = 'a11y-scan-insights-table';
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    ['Impact','New','Resolved','Net'].forEach(label => {
+      const th = document.createElement('th');
+      th.textContent = label;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    order.forEach(key => {
+      const entry = summary[key];
+      if (!entry) return;
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.scope = 'row';
+      th.appendChild(createImpactBadge(entry.impact));
+      tr.appendChild(th);
+      const newCell = document.createElement('td');
+      newCell.textContent = formatNumberValue(entry.newCount);
+      tr.appendChild(newCell);
+      const resolvedCell = document.createElement('td');
+      resolvedCell.textContent = formatNumberValue(entry.resolvedCount);
+      tr.appendChild(resolvedCell);
+  const netCell = document.createElement('td');
+  const pill = createDeltaPill(entry.net);
+  netCell.appendChild(pill);
+      tr.appendChild(netCell);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    return table;
+  }
+
+  function buildRuleDeltaSection(title, entries, { emptyMessage = 'No changes detected.' } = {}) {
+    if (!Array.isArray(entries) || !entries.length) {
+      return buildScanInsightsSection(title, buildScanInsightsNote(emptyMessage));
+    }
+    const list = document.createElement('ol');
+    list.className = 'a11y-scan-insights-list';
+    entries.forEach(entry => {
+      const item = document.createElement('li');
+      const head = document.createElement('div');
+      head.className = 'a11y-scan-insights-list-head';
+      const label = document.createElement('span');
+      label.className = 'a11y-scan-insights-list-title';
+      label.textContent = entry.ruleSummary || entry.ruleId || entry.pageTitle || 'Untitled';
+      head.appendChild(label);
+      if (entry.impact) {
+        head.appendChild(createImpactBadge(entry.impact));
+      }
+  const pill = createDeltaPill(entry.delta);
+      head.appendChild(pill);
+      item.appendChild(head);
+      const meta = document.createElement('p');
+      meta.className = 'a11y-scan-insights-note';
+      const newCount = formatNumberValue(entry.newCount);
+      const resolvedCount = formatNumberValue(entry.resolvedCount);
+      meta.textContent = `New: ${newCount} • Resolved: ${resolvedCount}${entry.pageSamples?.length ? ` • Pages: ${entry.pageSamples.join(', ')}` : ''}`;
+      item.appendChild(meta);
+      list.appendChild(item);
+    });
+    return buildScanInsightsSection(title, list);
+  }
+
+  function createImpactBadge(impact) {
+    const pill = document.createElement('span');
+    pill.className = `a11y-scan-insights-pill is-${impact || 'unknown'}`;
+    pill.textContent = formatImpactLabel(impact);
+    return pill;
+  }
+
+  function formatImpactLabel(impact) {
+    if (!impact) return 'Unknown';
+    if (impact === 'needsReview') return 'Needs review';
+    return capitalizeFirstLetter(impact);
+  }
+
+  function createDeltaPill(delta, { preferLower = true } = {}) {
+    const pill = document.createElement('span');
+    pill.className = 'a11y-scan-insights-pill';
+    const formatted = typeof delta === 'number' && delta > 0 ? `+${delta}` : String(delta);
+    pill.textContent = delta == null ? '0' : formatted;
+    if (delta > 0) {
+      pill.classList.add(preferLower ? 'is-negative' : 'is-positive');
+    } else if (delta < 0) {
+      pill.classList.add(preferLower ? 'is-positive' : 'is-negative');
+    } else {
+      pill.classList.add('is-neutral');
+    }
+    return pill;
+  }
+
+  function buildPageDeltaSection(progressData) {
+    const regressions = progressData?.diff?.pageRegressions || [];
+    const improvements = progressData?.diff?.pageImprovements || [];
+    if (!regressions.length && !improvements.length) {
+      return buildScanInsightsSection('Page improvements & regressions', buildScanInsightsNote('No page-level changes detected between the two runs.'));
+    }
+    const wrapper = document.createElement('div');
+    wrapper.className = 'a11y-scan-insights-two-col';
+    wrapper.appendChild(buildPageDeltaTable('Regressions', regressions.slice(0, 5)));
+    wrapper.appendChild(buildPageDeltaTable('Improvements', improvements.slice(0, 5)));
+    return buildScanInsightsSection('Page improvements & regressions', wrapper);
+  }
+
+  function buildPageDeltaTable(label, entries) {
+    const container = document.createElement('div');
+    container.className = 'a11y-scan-insights-subsection';
+    const heading = document.createElement('p');
+    heading.className = 'a11y-scan-insights-subheading';
+    heading.textContent = label;
+    container.appendChild(heading);
+    if (!entries.length) {
+      container.appendChild(buildScanInsightsNote('No changes detected.'));
+      return container;
+    }
+    const table = document.createElement('table');
+    table.className = 'a11y-scan-insights-table';
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    ['Page','New','Resolved','Net'].forEach(text => {
+      const th = document.createElement('th');
+      th.textContent = text;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    entries.forEach(entry => {
+      const tr = document.createElement('tr');
+      const pageCell = document.createElement('th');
+      pageCell.scope = 'row';
+      if (entry.pageUrl) {
+        const link = document.createElement('a');
+        link.href = entry.pageUrl;
+        link.target = '_blank';
+        link.rel = 'noreferrer noopener';
+        link.className = 'a11y-scan-insights-link';
+        link.textContent = entry.pageTitle || entry.pageUrl;
+        pageCell.appendChild(link);
+      } else {
+        pageCell.textContent = entry.pageTitle || 'Untitled page';
+      }
+      tr.appendChild(pageCell);
+      const newCell = document.createElement('td');
+      newCell.textContent = formatNumberValue(entry.newCount);
+      tr.appendChild(newCell);
+      const resolvedCell = document.createElement('td');
+      resolvedCell.textContent = formatNumberValue(entry.resolvedCount);
+      tr.appendChild(resolvedCell);
+  const netCell = document.createElement('td');
+  netCell.appendChild(createDeltaPill(entry.delta));
+      tr.appendChild(netCell);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    container.appendChild(table);
+    return container;
+  }
+
+  function buildPageHealthSummarySection(stats) {
+    if (!stats) {
+      return buildScanInsightsSection('Page health snapshot', buildScanInsightsNote('Page-level data is still loading.'));
+    }
+    const toCount = value => {
+      const num = coerceNumber(value, Number.NaN);
+      return Number.isFinite(num) ? Math.max(0, num) : null;
+    };
+    const runCounts = stats.runPageCounts || stats.latestPageCounts || null;
+    const runWithIssues = toCount(runCounts?.withIssues);
+    const runTotal = toCount(runCounts?.total);
+    let runHealthy = toCount(runCounts?.withoutIssues);
+    if (runHealthy == null && runTotal != null && runWithIssues != null) {
+      runHealthy = Math.max(0, runTotal - runWithIssues);
+    }
+  const sampleTotalLabel = stats.total != null ? formatNumberValue(stats.total) : null;
+  const sampleHint = sampleTotalLabel ? 'Sampled subset (' + sampleTotalLabel + ' pages)' : 'Sampled subset';
+    const withIssuesValue = runWithIssues ?? stats.withIssues;
+    const healthyValue = runHealthy ?? stats.healthy;
+    const withIssuesHint = runWithIssues != null ? 'Run total' : sampleHint;
+    const healthyHint = runHealthy != null ? 'Run total' : sampleHint;
+    const grid = document.createElement('div');
+    grid.className = 'a11y-scan-insights-summary-grid';
+    grid.appendChild(createMetricCard({ label: 'Pages sampled', value: formatNumberValue(stats.total) }));
+    grid.appendChild(
+      createMetricCard({ label: 'Pages with issues', value: formatNumberValue(withIssuesValue), hint: withIssuesHint })
+    );
+    grid.appendChild(
+      createMetricCard({ label: 'Healthy pages', value: formatNumberValue(healthyValue), hint: healthyHint })
+    );
+    grid.appendChild(createMetricCard({ label: 'Failed pages', value: formatNumberValue(stats.failed) }));
+    grid.appendChild(createMetricCard({ label: 'Template pages', value: formatNumberValue(stats.templateCount) }));
+    grid.appendChild(
+      createMetricCard({
+        label: 'Avg issues / page',
+        value: stats.averageIssuesPerPage ? stats.averageIssuesPerPage.toFixed(2) : '—'
+      })
+    );
+    return buildScanInsightsSection('Page health snapshot', grid);
+  }
+
+  function buildTopPagesSection(coverageData) {
+    const stats = coverageData?.stats;
+    if (!stats?.topPages?.length) {
+      return buildScanInsightsSection('Top impacted pages', buildScanInsightsNote('No page-level issue details are available for this run.'));
+    }
+    const table = document.createElement('table');
+    table.className = 'a11y-scan-insights-table';
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    ['Page','Critical','Serious','Total'].forEach(text => {
+      const th = document.createElement('th');
+      th.textContent = text;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    stats.topPages.forEach(page => {
+      const tr = document.createElement('tr');
+      const nameCell = document.createElement('th');
+      nameCell.scope = 'row';
+      if (page.url) {
+        const link = document.createElement('a');
+        link.href = page.url;
+        link.target = '_blank';
+        link.rel = 'noreferrer noopener';
+        link.className = 'a11y-scan-insights-link';
+        link.textContent = page.title || page.url;
+        nameCell.appendChild(link);
+      } else {
+        nameCell.textContent = page.title || 'Untitled page';
+      }
+      tr.appendChild(nameCell);
+      const criticalCell = document.createElement('td');
+      criticalCell.textContent = formatNumberValue(page.counts?.critical);
+      tr.appendChild(criticalCell);
+      const seriousCell = document.createElement('td');
+      seriousCell.textContent = formatNumberValue(page.counts?.serious);
+      tr.appendChild(seriousCell);
+      const totalCell = document.createElement('td');
+      totalCell.textContent = formatNumberValue(page.totalIssues);
+      tr.appendChild(totalCell);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    const body = [table];
+    if (coverageData?.truncated) {
+      body.push(
+        buildScanInsightsNote(
+          `Showing the first ${scanInsightsPageLimit.toLocaleString()} pages. Additional pages may be available in Monitor.`
+        )
+      );
+    }
+    return buildScanInsightsSection('Top impacted pages', body);
+  }
+
+  function buildCleanPagesSection(coverageData) {
+    const stats = coverageData?.stats;
+    const cleanPages = stats?.cleanPages || [];
+    if (!cleanPages.length) {
+      return buildScanInsightsSection('Pages without open issues', buildScanInsightsNote('No zero-issue pages were found in the sampled data.'));
+    }
+    const list = document.createElement('ul');
+    list.className = 'a11y-scan-insights-clean-list';
+    cleanPages.slice(0, 8).forEach(page => {
+      const item = document.createElement('li');
+      if (page.url) {
+        const link = document.createElement('a');
+        link.href = page.url;
+        link.target = '_blank';
+        link.rel = 'noreferrer noopener';
+        link.className = 'a11y-scan-insights-link';
+        link.textContent = page.title || page.url;
+        item.appendChild(link);
+      } else {
+        item.textContent = page.title || 'Untitled page';
+      }
+      list.appendChild(item);
+    });
+    return buildScanInsightsSection('Pages without open issues', list);
+  }
+  function sliceRecentRuns(runs, limit = 3) {
+    if (!Array.isArray(runs) || !runs.length) return [];
+    return runs.slice(0, Math.max(1, limit));
+  }
+
+  function getChronologicalRuns(runs) {
+    if (!Array.isArray(runs)) return [];
+    return runs.slice().reverse();
+  }
+
+  function clampPercent(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return null;
+    return Math.min(100, Math.max(0, num));
+  }
+
+  function wrapChartWithFigure(content, { caption, labelId } = {}) {
+    const figure = document.createElement('figure');
+    figure.className = 'a11y-scan-insights-figure';
+    figure.setAttribute('role','img');
+    const id = labelId || `a11y-scan-insights-caption-${Math.random().toString(36).slice(2)}`;
+    figure.setAttribute('aria-labelledby', id);
+    if (content) {
+      figure.appendChild(content);
+    }
+    const captionEl = document.createElement('figcaption');
+    captionEl.id = id;
+    captionEl.textContent = caption || 'Chart summarizing recent scan performance.';
+    figure.appendChild(captionEl);
+    return figure;
+  }
+
+  function sortRunsByCompletedAtAscending(runs) {
+    if (!Array.isArray(runs)) return [];
+    return runs
+      .filter(Boolean)
+      .slice()
+      .sort(compareRunsByCompletedAtAsc);
+  }
+
+  function compareRunsByCompletedAtAsc(a, b) {
+    const aTime = a?.completedAt instanceof Date ? a.completedAt.getTime() : Number.POSITIVE_INFINITY;
+    const bTime = b?.completedAt instanceof Date ? b.completedAt.getTime() : Number.POSITIVE_INFINITY;
+    if (Number.isFinite(aTime) && Number.isFinite(bTime) && aTime !== bTime) {
+      return aTime - bTime;
+    }
+    if (Number.isFinite(aTime) && !Number.isFinite(bTime)) return -1;
+    if (!Number.isFinite(aTime) && Number.isFinite(bTime)) return 1;
+    const aRun = a?.runNumber ?? Number.POSITIVE_INFINITY;
+    const bRun = b?.runNumber ?? Number.POSITIVE_INFINITY;
+    return aRun - bRun;
+  }
+
+  function getScorePercent(run) {
+    if (!run) return null;
+    const value = coerceNumber(run?.score, Number.NaN);
+    if (Number.isNaN(value)) return null;
+    const scaled = value <= 1 ? value * 100 : value;
+    return Math.min(100, Math.max(0, scaled));
+  }
+
+  function calculatePagesWithIssues(run) {
+    const summaryValue = coerceNumber(run?.pageIssueSummary?.completedWithIssues, Number.NaN);
+    if (Number.isFinite(summaryValue)) {
+      const value = Math.max(0, summaryValue);
+      logPagesWithIssuesResolution(run, 'summary.completedWithIssues', value, {
+        rawValue: summaryValue,
+        summary: run?.pageIssueSummary || null
+      });
+      return value;
+    }
+    const summaryCompleted = coerceNumber(
+      run?.pageIssueSummary?.completedPages ?? run?.pageIssueSummary?.totalPages,
+      Number.NaN
+    );
+    const summaryWithoutIssues = coerceNumber(run?.pageIssueSummary?.completedWithoutIssues, Number.NaN);
+    if (Number.isFinite(summaryCompleted) && Number.isFinite(summaryWithoutIssues)) {
+      const value = Math.max(0, summaryCompleted - summaryWithoutIssues);
+      logPagesWithIssuesResolution(run, 'summary.derived', value, {
+        completedPages: summaryCompleted,
+        completedWithoutIssues: summaryWithoutIssues,
+        summary: run?.pageIssueSummary || null
+      });
+      return value;
+    }
+    const counts = run?.pageCounts;
+    if (!counts) {
+      logPagesWithIssuesResolution(run, 'counts.missing', null);
+      return null;
+    }
+    const direct = coerceNumber(counts.withIssues, Number.NaN);
+    if (Number.isFinite(direct)) {
+      const value = Math.max(0, direct);
+      logPagesWithIssuesResolution(run, 'counts.withIssues', value, {
+        rawValue: direct,
+        counts
+      });
+      return value;
+    }
+    const severityInputs = { critical: 0, serious: 0, moderate: 0, minor: 0 };
+    const summed = ['critical','serious','moderate','minor'].reduce((sum, key) => {
+      const val = coerceNumber(counts[key], Number.NaN);
+      const normalized = Number.isFinite(val) ? Math.max(0, val) : 0;
+      severityInputs[key] = normalized;
+      return sum + normalized;
+    }, 0);
+    if (summed > 0) {
+      logPagesWithIssuesResolution(run, 'counts.severitySum', summed, {
+        severityInputs,
+        counts
+      });
+      return summed;
+    }
+    const total = coerceNumber(counts.total ?? run?.totalPages, Number.NaN);
+    const withoutIssues = coerceNumber(counts.withoutIssues, Number.NaN);
+    if (Number.isFinite(total) && Number.isFinite(withoutIssues)) {
+      const value = Math.max(0, total - withoutIssues);
+      logPagesWithIssuesResolution(run, 'counts.totalMinusWithout', value, {
+        total,
+        withoutIssues,
+        counts
+      });
+      return value;
+    }
+    logPagesWithIssuesResolution(run, 'unavailable', null);
+    return null;
+  }
+
+  function createScoreTrendChangeSummary(current, previous, { preferLower = false, changeFormatter, valueFormatter } = {}) {
+    const formatValue = typeof valueFormatter === 'function' ? valueFormatter : formatNumberValue;
+    if (!Number.isFinite(current) || !Number.isFinite(previous)) {
+      return 'Not enough data to compare yet.';
+    }
+    const delta = current - previous;
+    if (delta === 0) {
+      return `No change • previously ${formatValue(previous)}`;
+    }
+    const improved = preferLower ? delta < 0 : delta > 0;
+    const direction = improved ? 'better' : 'worse';
+    let changeText = '';
+    if (typeof changeFormatter === 'function') {
+      changeText = changeFormatter(delta, current, previous);
+    } else if (Math.abs(previous) > 0) {
+      changeText = formatPercent(Math.abs(delta) / Math.abs(previous), 1);
+    } else {
+      changeText = formatNumberValue(Math.abs(delta));
+    }
+    return `${changeText} ${direction} • previously ${formatValue(previous)}`;
+  }
+
+  function createUniqueId(prefix = 'id') {
+    return `${prefix}-${Math.random().toString(36).slice(2, 9)}`;
+  }
+
+  function buildScoreTrendSection(runs) {
+    const chronologicalRuns = getChronologicalRuns(runs);
+    const currentRunNumber = runs?.[0]?.runNumber ?? null;
+    const points = buildChronologicalPoints(
+      runs,
+      (run, meta) => ({
+        label: formatRunLabel(run),
+        value: clampPercent(run?.score),
+        subtitle: formatDateTimeLabel(run?.completedAt) || 'Completion pending',
+        isCurrent: meta.isCurrent
+      }),
+      { currentRunNumber }
+    );
+    const values = points.map(point => point.value).filter(value => Number.isFinite(value));
+    const stats = values.length
+      ? {
+          min: Math.max(0, Math.min(...values)),
+          max: Math.min(100, Math.max(...values))
+        }
+      : { min: 0, max: 100 };
+    let yMin = Math.max(0, stats.min - 5);
+    let yMax = Math.min(100, stats.max + 5);
+    if (yMax - yMin < 10) {
+      yMax = Math.min(100, yMin + 10);
+    }
+    const chartFigure = wrapChartWithFigure(
+      createLineChart(points, {
+        yMin,
+        yMax,
+        color: 'var(--accent-primary)',
+        valueFormatter: value => (Number.isFinite(value) ? `${value.toFixed(1)}%` : '—'),
+        xLabel: 'Runs (oldest → newest)',
+        yLabel: 'Score (%)'
+      }),
+      {
+        caption: 'Line chart showing accessibility score trend for recent runs; the current run is highlighted.'
+      }
+    );
+    const table = buildRunTable(chronologicalRuns, [
+      { header: 'Run', getValue: run => formatRunLabel(run), isRowHeader: true },
+      { header: 'Completed at', getValue: run => formatDateTimeLabel(run?.completedAt) || '—' },
+      { header: 'Score', getValue: run => formatScoreValue(run?.score) },
+      { header: 'Total issues', getValue: run => formatNumberValue(run?.totalIssues) },
+      { header: 'Pages total', getValue: run => formatNumberValue(run?.totalPages) }
+    ], {
+      caption: 'Table of run scores, completion dates, totals, ordered from oldest to newest. Current run is flagged.',
+      highlightRunNumber: currentRunNumber
+    });
+    return buildScanInsightsSection('Score over recent runs', [chartFigure, table]);
+  }
+
+  function buildIssuesImpactSection(runs) {
+    const chronologicalRuns = getChronologicalRuns(runs);
+    const currentRunNumber = runs?.[0]?.runNumber ?? null;
+    const chartFigure = wrapChartWithFigure(
+      createStackedImpactChart(chronologicalRuns, {
+        highlightRunNumber: currentRunNumber
+      }),
+      {
+        caption: 'Stacked bars showing issue counts by impact level for recent runs; current run highlighted with total and high-impact callouts.'
+      }
+    );
+    const table = buildRunTable(chronologicalRuns, [
+      { header: 'Run', getValue: run => formatRunLabel(run), isRowHeader: true },
+      { header: 'Critical', getValue: run => formatNumberValue(run?.issueCounts?.critical) },
+      { header: 'Serious', getValue: run => formatNumberValue(run?.issueCounts?.serious) },
+      { header: 'Moderate', getValue: run => formatNumberValue(run?.issueCounts?.moderate) },
+      { header: 'Minor', getValue: run => formatNumberValue(run?.issueCounts?.minor) },
+      { header: 'Total', getValue: run => formatNumberValue(run?.totalIssues) },
+      { header: 'High-impact %', getValue: run => {
+        const high = calculateHighImpactCount(run);
+        const total = Number(run?.totalIssues) || 0;
+        if (!total) return '—';
+        return formatPercent(high / total, 1);
+      }}
+    ], {
+      caption: 'Issue counts per impact level for recent runs, oldest to newest order. Current run is labeled.',
+      highlightRunNumber: currentRunNumber
+    });
+    return buildScanInsightsSection('Issues by impact across runs', [chartFigure, table]);
+  }
+
+  function buildWeightedDensitySection(runs) {
+    const chronologicalRuns = getChronologicalRuns(runs);
+    const currentRunNumber = runs?.[0]?.runNumber ?? null;
+    const points = buildChronologicalPoints(
+      runs,
+      (run, meta) => ({
+        label: formatRunLabel(run),
+        value: calculateWeightedDensity(run),
+        subtitle: `${formatNumberValue(run?.totalPages)} pages`,
+        isCurrent: meta.isCurrent
+      }),
+      { currentRunNumber }
+    );
+    const values = points.map(point => point.value).filter(value => Number.isFinite(value));
+    const stats = values.length
+      ? {
+          min: Math.min(...values),
+          max: Math.max(...values)
+        }
+      : { min: 0, max: 1 };
+    const span = stats.max - stats.min || stats.max || 1;
+    const yMin = Math.max(0, stats.min - span * 0.15);
+    const yMax = stats.max + span * 0.15;
+    const chartFigure = wrapChartWithFigure(
+      createLineChart(points, {
+        yMin,
+        yMax,
+        color: '#0f172a',
+        valueFormatter: value => (Number.isFinite(value) ? value.toFixed(3) : '—'),
+        xLabel: 'Runs (oldest → newest)',
+        yLabel: 'Weighted issues per page'
+      }),
+      {
+        caption: 'Line chart of severity-weighted issue density per run; the current run is highlighted.'
+      }
+    );
+    const table = buildRunTable(chronologicalRuns, [
+      { header: 'Run', getValue: run => formatRunLabel(run), isRowHeader: true },
+      { header: 'Pages', getValue: run => formatNumberValue(run?.totalPages) },
+      { header: 'Weighted score', getValue: run => formatNumberValue(calculateWeightedScore(run)) },
+      { header: 'Weighted density', getValue: run => {
+        const density = calculateWeightedDensity(run);
+        return Number.isFinite(density) ? density.toFixed(3) : '—';
+      }}
+    ], {
+      caption: 'Weighted density metrics per run ordered from oldest to newest.',
+      highlightRunNumber: currentRunNumber
+    });
+    return buildScanInsightsSection('Severity-weighted issue density', [chartFigure, table]);
+  }
+
+  function buildHighImpactDeltaSection(latest, previous) {
+    if (!latest || !previous) {
+      const msg = document.createElement('p');
+      msg.className = 'a11y-scan-insights-placeholder';
+      msg.textContent = 'At least two completed runs are required to compare high-impact issues.';
+      return buildScanInsightsSection('High-impact issues vs last run', msg);
+    }
+    const latestHigh = calculateHighImpactCount(latest);
+    const previousHigh = calculateHighImpactCount(previous);
+    const badge = createDeltaBadge(latestHigh, previousHigh, {
+      preferLower: true,
+      showDirectionText: true
+    });
+    const difference = latestHigh - previousHigh;
+    const percentChange = previousHigh ? (difference / previousHigh) : null;
+    let description = 'No change compared to the previous run.';
+    if (difference > 0) {
+      description = `High-impact issues increased by ${formatNumberValue(difference)}${
+        Number.isFinite(percentChange) ? ` (${formatPercent(percentChange, 1)})` : ''
+      } compared to the previous run.`;
+    } else if (difference < 0) {
+      description = `High-impact issues decreased by ${formatNumberValue(Math.abs(difference))}${
+        Number.isFinite(percentChange) ? ` (${formatPercent(Math.abs(percentChange), 1)})` : ''
+      } compared to the previous run.`;
+    }
+    const card = createMetricCard({
+      label: 'High-impact issues vs last run',
+      value: formatNumberValue(latestHigh),
+      hint: `Previous run: ${formatNumberValue(previousHigh)}`,
+      description,
+      delta: badge
+    });
+    return buildScanInsightsSection('High-impact issues vs last run', card);
+  }
+
+  function buildChronologicalPoints(runs, mapper, { currentRunNumber } = {}) {
+    if (!Array.isArray(runs)) return [];
+    const chronological = runs.slice().reverse();
+    return chronological
+      .map((run, index) => {
+        const point = mapper(run, {
+          index,
+          total: chronological.length,
+          isCurrent: currentRunNumber != null && run?.runNumber === currentRunNumber
+        });
+        return point;
+      })
+      .filter(point => point && point.value != null);
+  }
+
+  function createLineChart(points, {
+    yMin = null,
+    yMax = null,
+    color = 'var(--accent-primary)',
+    valueFormatter = formatNumberValue,
+    xLabel = 'Runs',
+    yLabel = 'Value',
+    showPointLabels = false,
+    pointLabelFormatter
+  } = {}) {
+    if (!points || !points.length) {
+      const placeholder = document.createElement('p');
+      placeholder.className = 'a11y-scan-insights-placeholder';
+      placeholder.textContent = 'Not enough data to render this chart yet.';
+      return placeholder;
+    }
+    const width = Math.max(260, points.length * 120);
+    const height = 220;
+    const numericValues = points
+      .map(point => Number(point.value))
+      .filter(value => Number.isFinite(value));
+    const maxPoint = numericValues.length ? Math.max(...numericValues) : 1;
+    const minPoint = numericValues.length ? Math.min(...numericValues) : 0;
+    const maxValue = yMax != null ? yMax : maxPoint;
+    const minValue = yMin != null ? yMin : minPoint;
+    const chartHeight = height - 60;
+    const chartOffset = 30;
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.setAttribute('role','presentation');
+    svg.setAttribute('aria-hidden','true');
+    svg.classList.add('a11y-scan-insights-line-chart');
+    const axis = document.createElementNS('http://www.w3.org/2000/svg','line');
+    axis.setAttribute('x1','20');
+    axis.setAttribute('x2', width - 20);
+    axis.setAttribute('y1', height - chartOffset);
+    axis.setAttribute('y2', height - chartOffset);
+    axis.setAttribute('class','a11y-scan-insights-line-axis');
+    svg.appendChild(axis);
+    const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+    const range = Math.max(0.0001, maxValue - minValue);
+    const coords = points.map((point, index) => {
+      const t = points.length === 1 ? 0 : index / (points.length - 1);
+      const x = 20 + t * (width - 40);
+      const rawValue = Number(point.value);
+      const normalized = Math.min(Math.max(Number.isFinite(rawValue) ? rawValue : minValue, minValue), maxValue);
+      const y = height - chartOffset - ((normalized - minValue) / range) * chartHeight;
+      return { x, y, point };
+    });
+    const d = coords
+      .map(({ x, y }, index) => `${index === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`)
+      .join(' ');
+    path.setAttribute('d', d);
+    path.classList.add('a11y-scan-insights-line-path');
+    path.style.stroke = color;
+    svg.appendChild(path);
+    coords.forEach(({ x, y, point }) => {
+      const circle = document.createElementNS('http://www.w3.org/2000/svg','circle');
+      circle.setAttribute('cx', x.toFixed(2));
+      circle.setAttribute('cy', y.toFixed(2));
+      circle.setAttribute('r', point.isCurrent ? '6' : '4.5');
+      circle.classList.add('a11y-scan-insights-line-dot');
+      if (point.isCurrent) {
+        circle.classList.add('is-current');
+      }
+      circle.style.stroke = color;
+      circle.style.fill = point.isCurrent ? color : '#fff';
+      circle.title = `${point.label}: ${valueFormatter(point.value)}`;
+      svg.appendChild(circle);
+      if (showPointLabels) {
+        const label = document.createElementNS('http://www.w3.org/2000/svg','text');
+        label.classList.add('a11y-scan-insights-line-point-label');
+        if (point.isCurrent) {
+          label.classList.add('is-current');
+        }
+        const labelText = typeof pointLabelFormatter === 'function'
+          ? pointLabelFormatter(point)
+          : valueFormatter(point.value);
+        label.textContent = labelText;
+        label.setAttribute('text-anchor','middle');
+        const labelY = Math.max(18, y - 10);
+        label.setAttribute('x', x.toFixed(2));
+        label.setAttribute('y', labelY.toFixed(2));
+        label.style.fill = point.isCurrent ? color : '#0f172a';
+        svg.appendChild(label);
+      }
+    });
+    const legend = createLegendList(points, valueFormatter);
+    const wrapper = document.createElement('div');
+    wrapper.className = 'a11y-scan-insights-line';
+    const axisLabels = document.createElement('div');
+    axisLabels.className = 'a11y-scan-insights-axis-labels';
+    const yAxisLabel = document.createElement('span');
+    yAxisLabel.className = 'a11y-scan-insights-axis-label is-y-axis';
+    yAxisLabel.textContent = yLabel;
+    const xAxisLabel = document.createElement('span');
+    xAxisLabel.className = 'a11y-scan-insights-axis-label is-x-axis';
+    xAxisLabel.textContent = xLabel;
+    axisLabels.appendChild(yAxisLabel);
+    axisLabels.appendChild(xAxisLabel);
+    wrapper.appendChild(axisLabels);
+    wrapper.appendChild(svg);
+    wrapper.appendChild(legend);
+    return wrapper;
+  }
+
+  function createLegendList(points, valueFormatter = formatNumberValue) {
+    const legend = document.createElement('ol');
+    legend.className = 'a11y-scan-insights-line-legend';
+    points.forEach(point => {
+      const item = document.createElement('li');
+      if (point.isCurrent) {
+        item.classList.add('is-current-run');
+      }
+      const label = document.createElement('span');
+      label.className = 'a11y-scan-insights-line-label';
+      label.textContent = point.label;
+      if (point.isCurrent) {
+        const badge = document.createElement('span');
+        badge.className = 'a11y-scan-insights-current-label';
+        badge.textContent = 'Current run';
+        label.appendChild(document.createTextNode(' '));
+        label.appendChild(badge);
+      }
+      const value = document.createElement('span');
+      value.className = 'a11y-scan-insights-line-value';
+      value.textContent = valueFormatter(point.value);
+      item.appendChild(label);
+      if (point.subtitle) {
+        const subtitle = document.createElement('span');
+        subtitle.className = 'a11y-scan-insights-line-subtitle';
+        subtitle.textContent = point.subtitle;
+        item.appendChild(subtitle);
+      }
+      item.appendChild(value);
+      legend.appendChild(item);
+    });
+    return legend;
+  }
+
+  function createStackedImpactChart(runs, { highlightRunNumber } = {}) {
+    if (!runs || !runs.length) {
+      return buildScanInsightsPreface('health');
+    }
+    const container = document.createElement('div');
+    container.className = 'a11y-scan-insights-stack';
+    const segments = [
+      { key: 'critical', label: 'Critical' },
+      { key: 'serious', label: 'Serious' },
+      { key: 'moderate', label: 'Moderate' },
+      { key: 'minor', label: 'Minor' }
+    ];
+    runs.forEach(run => {
+      const row = document.createElement('div');
+      row.className = 'a11y-scan-insights-stack-row';
+      const isCurrent = highlightRunNumber != null && run?.runNumber === highlightRunNumber;
+      if (isCurrent) {
+        row.classList.add('is-current-run');
+        row.setAttribute('data-current-run','true');
+      }
+      const label = document.createElement('div');
+      label.className = 'a11y-scan-insights-stack-label';
+      label.textContent = formatRunLabel(run);
+      if (isCurrent) {
+        const badge = document.createElement('span');
+        badge.className = 'a11y-scan-insights-current-label';
+        badge.textContent = 'Current run';
+        label.appendChild(badge);
+      }
+      const bar = document.createElement('div');
+      bar.className = 'a11y-scan-insights-stack-bar';
+      const total = Math.max(0, Number(run?.totalIssues) || 0);
+      segments.forEach(segment => {
+        const value = Math.max(0, Number(run?.issueCounts?.[segment.key]) || 0);
+        const percent = total ? (value / total) * 100 : 0;
+        const span = document.createElement('span');
+        span.className = `a11y-scan-insights-stack-segment is-${segment.key}`;
+        span.style.width = `${percent}%`;
+        span.title = `${segment.label}: ${formatNumberValue(value)} issues`;
+        if (!percent && value > 0) {
+          span.style.width = '2px';
+        }
+        bar.appendChild(span);
+      });
+      const value = document.createElement('div');
+      value.className = 'a11y-scan-insights-stack-value';
+      value.textContent = `${formatNumberValue(run?.totalIssues)} issues`;
+      const highImpact = calculateHighImpactCount(run);
+      const highPercent = total ? formatPercent(highImpact / total, 1) : '—';
+      const highBadge = document.createElement('span');
+      highBadge.className = 'a11y-scan-insights-stack-high';
+      highBadge.textContent = `High impact: ${formatNumberValue(highImpact)} (${highPercent})`;
+      value.appendChild(highBadge);
+      row.appendChild(label);
+      row.appendChild(bar);
+      row.appendChild(value);
+      container.appendChild(row);
+    });
+    const legend = document.createElement('div');
+    legend.className = 'a11y-scan-insights-stack-legend';
+    const highLegend = document.createElement('span');
+    highLegend.className = 'a11y-scan-insights-stack-legend-item is-high';
+    highLegend.textContent = 'High impact = Critical + Serious';
+    legend.appendChild(highLegend);
+    segments.forEach(segment => {
+      const item = document.createElement('span');
+      item.className = `a11y-scan-insights-stack-legend-item is-${segment.key}`;
+      item.textContent = segment.label;
+      legend.appendChild(item);
+    });
+    const wrapper = document.createElement('div');
+    wrapper.className = 'a11y-scan-insights-stack-wrapper';
+    wrapper.appendChild(container);
+    wrapper.appendChild(legend);
+    return wrapper;
+  }
+
+  function buildRunTable(runs, columns, { caption, highlightRunNumber } = {}) {
+    const table = document.createElement('table');
+    table.className = 'a11y-scan-insights-table';
+    if (caption) {
+      const captionEl = document.createElement('caption');
+      captionEl.textContent = caption;
+      table.appendChild(captionEl);
+    }
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    columns.forEach(col => {
+      const th = document.createElement('th');
+      th.textContent = col.header;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    runs.forEach(run => {
+      const tr = document.createElement('tr');
+      const isCurrent = highlightRunNumber != null && run?.runNumber === highlightRunNumber;
+      if (isCurrent) {
+        tr.classList.add('is-current-run');
+        tr.setAttribute('data-current-run','true');
+      }
+      columns.forEach((col, index) => {
+        const cell = col.isRowHeader ? document.createElement('th') : document.createElement('td');
+        if (col.isRowHeader) cell.scope = 'row';
+        const value = col.getValue(run);
+        if (value instanceof Node) {
+          cell.appendChild(value);
+        } else {
+          cell.textContent = value == null || value === '' ? '—' : value;
+        }
+        if (col.isRowHeader && isCurrent) {
+          const badge = document.createElement('span');
+          badge.className = 'a11y-scan-insights-current-label';
+          badge.textContent = 'Current run';
+          cell.classList.add('has-current-label');
+          cell.appendChild(badge);
+        }
+        tr.appendChild(cell);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    return table;
+  }
+
+  function calculateHighImpactCount(run) {
+    const crit = Math.max(0, Number(run?.issueCounts?.critical) || 0);
+    const serious = Math.max(0, Number(run?.issueCounts?.serious) || 0);
+    return crit + serious;
+  }
+
+  function calculateWeightedScore(run) {
+    const crit = Math.max(0, Number(run?.issueCounts?.critical) || 0);
+    const serious = Math.max(0, Number(run?.issueCounts?.serious) || 0);
+    const moderate = Math.max(0, Number(run?.issueCounts?.moderate) || 0);
+    return 5 * crit + 3 * serious + moderate;
+  }
+
+  function calculateWeightedDensity(run) {
+    const weightedScore = calculateWeightedScore(run);
+    const pages = Math.max(1, Number(run?.totalPages) || 1);
+    const density = weightedScore / pages;
+    return Number.isFinite(density) ? density : null;
+  }
+
+  function formatPercent(value, fractionDigits = 1) {
+    if (!Number.isFinite(value)) return '—';
+    return (value * 100).toFixed(fractionDigits) + '%';
+  }
+
+  function formatRunLabel(run) {
+    return run?.runNumber != null ? `Run #${run.runNumber}` : 'Run —';
+  }
+
+  function buildDeltaTable(latest, previous) {
+    const rows = [
+      {
+        label: 'Accessibility score',
+        getLatest: run => getScorePercent(run),
+        formatter: value => formatScoreValue(value),
+        preferLower: false,
+        fractionDigits: 1,
+        suffix: '%'
+      },
+      {
+        label: 'Total issues',
+        getLatest: run => run?.totalIssues,
+        formatter: formatNumberValue,
+        preferLower: true
+      },
+      {
+        label: 'Critical issues',
+        getLatest: run => run?.issueCounts?.critical,
+        formatter: formatNumberValue,
+        preferLower: true
+      },
+      {
+        label: 'Serious issues',
+        getLatest: run => run?.issueCounts?.serious,
+        formatter: formatNumberValue,
+        preferLower: true
+      },
+      {
+        label: 'Moderate issues',
+        getLatest: run => run?.issueCounts?.moderate,
+        formatter: formatNumberValue,
+        preferLower: true
+      },
+      {
+        label: 'Minor issues',
+        getLatest: run => run?.issueCounts?.minor,
+        formatter: formatNumberValue,
+        preferLower: true
+      },
+      {
+        label: 'Pages with issues',
+        getLatest: run => calculatePagesWithIssues(run),
+        formatter: formatNumberValue,
+        preferLower: true
+      },
+      {
+        label: 'Pages scanned',
+        getLatest: run => run?.totalPages,
+        formatter: formatNumberValue,
+        preferLower: false
+      }
+    ];
+    const table = document.createElement('table');
+    table.className = 'a11y-scan-insights-table';
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    ['Metric','Latest run','Previous run','Δ'].forEach(text => {
+      const th = document.createElement('th');
+      th.textContent = text;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    rows.forEach(row => {
+      const latestValue = typeof row.getLatest === 'function' ? row.getLatest(latest) : null;
+      const previousValue = typeof row.getLatest === 'function' ? row.getLatest(previous) : null;
+      const tr = document.createElement('tr');
+      const labelCell = document.createElement('th');
+      labelCell.scope = 'row';
+      labelCell.textContent = row.label;
+      tr.appendChild(labelCell);
+      const latestCell = document.createElement('td');
+      latestCell.textContent = typeof row.formatter === 'function' ? row.formatter(latestValue) : formatNumberValue(latestValue);
+      tr.appendChild(latestCell);
+      const prevCell = document.createElement('td');
+      prevCell.textContent = typeof row.formatter === 'function' ? row.formatter(previousValue) : formatNumberValue(previousValue);
+      tr.appendChild(prevCell);
+      const deltaCell = document.createElement('td');
+      const delta = createDeltaBadge(latestValue, previousValue, {
+        preferLower: row.preferLower,
+        fractionDigits: row.fractionDigits,
+        suffix: row.suffix
+      });
+      if (delta) {
+        deltaCell.appendChild(delta);
+      } else {
+        deltaCell.textContent = '—';
+      }
+      tr.appendChild(deltaCell);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    return table;
+  }
+
+  function buildCoverageGrid(latest) {
+    const grid = document.createElement('div');
+    grid.className = 'a11y-scan-insights-coverage-grid';
+    const counts = latest.pageCounts || {};
+    const order = [
+      { key: 'critical', label: 'Critical pages' },
+      { key: 'serious', label: 'Serious pages' },
+      { key: 'moderate', label: 'Moderate pages' },
+      { key: 'minor', label: 'Minor pages' },
+      { key: 'needsReview', label: 'Needs review' }
+    ];
+    order.forEach(item => {
+      const card = createMetricCard({
+        label: item.label,
+        value: formatNumberValue(counts[item.key])
+      });
+      grid.appendChild(card);
+    });
+    return grid;
+  }
+
+  function buildRunMetaList(latest) {
+    const list = document.createElement('dl');
+    list.className = 'a11y-scan-insights-meta-list';
+    const entries = [
+      { label: 'Run number', value: latest.runNumber != null ? `#${latest.runNumber}` : '—' },
+      { label: 'Status', value: capitalizeFirstLetter(latest.status || 'unknown') },
+      { label: 'Started', value: formatDateTimeLabel(latest.startedAt) || '—' },
+      { label: 'Completed', value: formatDateTimeLabel(latest.completedAt) || '—' },
+      { label: 'Duration', value: formatDuration(latest.durationSeconds) },
+      { label: 'Pages scanned', value: formatNumberValue(latest.totalPages) },
+      { label: 'Needs review issues', value: formatNumberValue((latest.issueCounts || {}).needsReview) }
+    ];
+    entries.forEach(entry => {
+      const term = document.createElement('dt');
+      term.textContent = entry.label;
+      const desc = document.createElement('dd');
+      desc.textContent = entry.value || '—';
+      list.appendChild(term);
+      list.appendChild(desc);
+    });
+    return list;
+  }
+
+  function deriveImpactMeta(current, previous, preferLower = false) {
+    if (!Number.isFinite(current) || !Number.isFinite(previous) || current === previous) {
+      return { impact: 'neutral', arrow: 'flat', delta: 0 };
+    }
+    const delta = current - previous;
+    const impactImproved = preferLower ? delta < 0 : delta > 0;
+    const impact = impactImproved ? 'positive' : 'negative';
+    const arrow = delta > 0 ? 'up' : 'down';
+    return { impact, arrow, delta };
+  }
+
+  function createImpactArrowIcon(direction) {
+    const paths = {
+      up: 'M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z',
+      down: 'M16 18l2.29-2.29-4.88-4.88-4 4L2 7.41 3.41 6l6 6 4-4 6.3 6.29L22 12v6z',
+      flat: 'M4 12h16v2H4z'
+    };
+    const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
+    svg.setAttribute('viewBox','0 0 24 24');
+    svg.setAttribute('focusable','false');
+    svg.setAttribute('aria-hidden','true');
+    svg.classList.add('a11y-scan-insights-impact-icon','summary-icon');
+    const pathNone = document.createElementNS('http://www.w3.org/2000/svg','path');
+    pathNone.setAttribute('d','M0 0h24v24H0z');
+    pathNone.setAttribute('fill','none');
+    svg.appendChild(pathNone);
+    const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+    path.setAttribute('d', paths[direction] || paths.down);
+    path.setAttribute('fill','currentColor');
+    svg.appendChild(path);
+    return svg;
+  }
+
+  function createImpactSummaryCard(definition) {
+    const {
+      label,
+      current,
+      previous,
+      preferLower = false,
+      changeFormatter,
+      valueFormatter = formatNumberValue
+    } = definition || {};
+    const description = createScoreTrendChangeSummary(current, previous, {
+      preferLower,
+      changeFormatter,
+      valueFormatter
+    });
+    const meta = deriveImpactMeta(current, previous, preferLower);
+  const formattedValue = valueFormatter ? valueFormatter(current) : current;
+  const card = document.createElement('div');
+    card.className = `a11y-scan-insights-impact-card impact-${meta.impact}`;
+    card.setAttribute('aria-label', `${label || 'Metric'} summary`);
+    const icon = createImpactArrowIcon(meta.arrow);
+    card.appendChild(icon);
+    const valueEl = document.createElement('p');
+    valueEl.className = 'a11y-scan-insights-impact-value';
+  valueEl.textContent = formattedValue == null || formattedValue === '' ? '—' : formattedValue;
+    card.appendChild(valueEl);
+    const labelEl = document.createElement('p');
+    labelEl.className = 'a11y-scan-insights-impact-label';
+    labelEl.textContent = label ?? 'Metric';
+    card.appendChild(labelEl);
+    const divider = document.createElement('hr');
+    divider.className = 'a11y-scan-insights-impact-divider';
+    card.appendChild(divider);
+    const trendEl = document.createElement('p');
+    trendEl.className = 'a11y-scan-insights-impact-trend';
+    trendEl.textContent = description;
+    card.appendChild(trendEl);
+    return card;
+  }
+
+  function createMetricCard({ label, value, hint, delta, intent, description }) {
+    const card = document.createElement('div');
+    card.className = `a11y-scan-insights-card${intent ? ` is-${intent}` : ''}`;
+    const labelEl = document.createElement('p');
+    labelEl.className = 'a11y-scan-insights-card-label';
+    labelEl.textContent = label;
+    const valueEl = document.createElement('p');
+    valueEl.className = 'a11y-scan-insights-card-value';
+    valueEl.textContent = value == null || value === '' ? '—' : value;
+    card.appendChild(labelEl);
+    card.appendChild(valueEl);
+    if (hint) {
+      const hintEl = document.createElement('p');
+      hintEl.className = 'a11y-scan-insights-card-hint';
+      hintEl.textContent = hint;
+      card.appendChild(hintEl);
+    }
+    if (description) {
+      const descEl = document.createElement('p');
+      descEl.className = 'a11y-scan-insights-card-desc';
+      descEl.textContent = description;
+      card.appendChild(descEl);
+    }
+    if (delta) {
+      delta.classList.add('a11y-scan-insights-delta');
+      card.appendChild(delta);
+    }
+    return card;
+  }
+
+  function createDeltaBadge(current, previous, { preferLower = false, fractionDigits = 0, suffix = '', showDirectionText = false } = {}) {
+    if (current == null || previous == null) return null;
+    const delta = current - previous;
+    const badge = document.createElement('span');
+    badge.className = 'a11y-scan-insights-delta-value';
+    if (delta === 0) {
+      badge.textContent = 'No change';
+      badge.classList.add('is-neutral');
+      return badge;
+    }
+    const formatted = formatSignedValue(delta, fractionDigits) + (suffix || '');
+    const arrow = delta > 0 ? '▲' : '▼';
+    badge.textContent = `${arrow} ${formatted}`.trim();
+    const improved = preferLower ? delta < 0 : delta > 0;
+    badge.classList.add(improved ? 'is-positive' : 'is-negative');
+    const trendWord = improved ? 'improvement' : 'regression';
+    badge.setAttribute('aria-label', `${Math.abs(delta).toLocaleString()} change (${trendWord})`);
+    if (showDirectionText) {
+      const text = document.createElement('span');
+      text.className = 'a11y-scan-insights-delta-direction';
+      text.textContent = improved ? 'Improved' : 'Regressed';
+      badge.appendChild(text);
+    }
+    return badge;
+  }
+
+  function formatSignedValue(value, fractionDigits = 0) {
+    const abs = Math.abs(value);
+    const text = Number.isFinite(abs)
+      ? abs.toLocaleString(undefined, {
+          minimumFractionDigits: fractionDigits,
+          maximumFractionDigits: fractionDigits
+        })
+      : '-';
+    return `${value > 0 ? '+' : '-'}${text}`;
+  }
+
+  function formatNumberValue(value) {
+    if (value == null || Number.isNaN(value)) return '—';
+    return Number(value).toLocaleString();
+  }
+
+  function formatScoreValue(value) {
+    if (value == null || Number.isNaN(value)) return '—';
+    return `${Number(value).toFixed(1)}%`;
+  }
+
+  function formatDuration(seconds) {
+    if (!Number.isFinite(seconds) || seconds <= 0) return '—';
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    if (seconds < 3600) {
+      const mins = Math.floor(seconds / 60);
+      const secs = Math.round(seconds % 60);
+      return secs ? `${mins}m ${secs}s` : `${mins}m`;
+    }
+    const hours = Math.floor(seconds / 3600);
+    const mins = Math.round((seconds % 3600) / 60);
+    return mins ? `${hours}h ${mins}m` : `${hours}h`;
+  }
+
+  function formatDateTimeLabel(date) {
+    if (!(date instanceof Date)) return '';
+    try {
+      return new Intl.DateTimeFormat(undefined, {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit'
+      }).format(date);
+    } catch (err) {
+      return date.toLocaleString();
+    }
+  }
+
+  function formatDateOnlyLabel(date) {
+    if (!(date instanceof Date)) return '';
+    try {
+      return new Intl.DateTimeFormat(undefined, {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric'
+      }).format(date);
+    } catch (err) {
+      return date.toDateString();
+    }
+  }
+
+  function capitalizeFirstLetter(text) {
+    if (!text) return '';
+    return text.charAt(0).toUpperCase() + text.slice(1);
+  }
+
   const pageContext = isScansListPage ? 'scans' : isPagesListPage ? 'pages' : 'issues';
   const scanRunParam = isIssuesQuickActionsPage
     ? new URLSearchParams(location.search || '').get('scanRun')
@@ -139,6 +2192,1578 @@
   // Ensure single root
   const existingRoot = document.querySelector('.a11y-scan-report-root');
   if (existingRoot) existingRoot.remove();
+
+  function initScanDetailInsights(context) {
+    scanInsightsState.context = context;
+    resetScanInsightsData();
+    ensureScanInsightsTrigger();
+  }
+
+  function ensureScanInsightsTrigger() {
+    if (!root) return;
+    const existing = scanInsightsState.trigger;
+    if (existing && root.contains(existing)) {
+      existing.textContent = 'Scan insights';
+      return;
+    }
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'a11y-scan-report-button';
+    button.textContent = 'Scan insights';
+    button.dataset.widget = 'scan-insights';
+    button.setAttribute('aria-label','Open scan insights modal');
+    button.setAttribute('aria-expanded','false');
+    button.addEventListener('click', () => {
+      button.setAttribute('aria-expanded','true');
+      openModal(button, { mode: 'scanInsights' }).catch(err => {
+        alert(err?.message || 'Unable to open scan insights.');
+        button.setAttribute('aria-expanded','false');
+      });
+    });
+    root.appendChild(button);
+    scanInsightsState.trigger = button;
+  }
+
+  function updateScanInsightsSubtitle() {
+    if (!scanInsightsState.subtitleEl) return;
+    const { scanId, runNumber } = scanInsightsState.context || {};
+    const subtitleRunLabel = runNumber != null ? `run ${runNumber}` : 'latest run';
+    scanInsightsState.subtitleEl.textContent = scanId
+      ? `Snapshot for scan ${scanId} (${subtitleRunLabel})`
+      : `Snapshot of the ${subtitleRunLabel}`;
+  }
+
+  function renderScanInsightsDialog(body, footer) {
+    body.innerHTML = '';
+    footer.innerHTML = '';
+    body.setAttribute('tabindex','0');
+    scanInsightsState.panels = new Map();
+    scanInsightsState.tabButtons = [];
+
+    const tabList = document.createElement('div');
+    tabList.className = 'a11y-tablist a11y-scan-insights-tablist';
+    tabList.setAttribute('role','tablist');
+    tabList.setAttribute('aria-labelledby','a11y-scan-report-title');
+    body.appendChild(tabList);
+
+    const panelsWrap = document.createElement('div');
+    panelsWrap.className = 'a11y-tabpanels a11y-scan-insights-panels';
+    body.appendChild(panelsWrap);
+
+    const handleTabKeydown = (event, index) => {
+      const { key } = event;
+      if (!scanInsightsState.tabButtons.length) return;
+      const maxIndex = scanInsightsState.tabButtons.length - 1;
+      let nextIndex = null;
+      if (key === 'ArrowLeft' || key === 'ArrowUp') {
+        nextIndex = (index - 1 + scanInsightsState.tabButtons.length) % scanInsightsState.tabButtons.length;
+      } else if (key === 'ArrowRight' || key === 'ArrowDown') {
+        nextIndex = (index + 1) % scanInsightsState.tabButtons.length;
+      } else if (key === 'Home') {
+        nextIndex = 0;
+      } else if (key === 'End') {
+        nextIndex = maxIndex;
+      } else if (key === 'Enter' || key === ' ' || key === 'Spacebar') {
+        event.preventDefault();
+        const targetKey = scanInsightsState.tabButtons[index]?.dataset.tabKey;
+        if (targetKey) switchScanInsightsTab(targetKey);
+        return;
+      } else {
+        return;
+      }
+      event.preventDefault();
+      const nextBtn = scanInsightsState.tabButtons[nextIndex];
+      if (nextBtn) {
+        nextBtn.focus();
+        switchScanInsightsTab(nextBtn.dataset.tabKey);
+      }
+    };
+
+    scanInsightsTabs.forEach((tab, index) => {
+      const tabId = `a11y-scan-insights-tab-${tab.key}`;
+      const panelId = `a11y-scan-insights-panel-${tab.key}`;
+      const isSelected = tab.key === scanInsightsState.activeTab;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.id = tabId;
+      btn.dataset.tabKey = tab.key;
+      btn.dataset.scanInsightsTab = tab.key;
+      btn.setAttribute('role','tab');
+      btn.setAttribute('aria-controls', panelId);
+      btn.setAttribute('aria-selected', String(isSelected));
+      btn.tabIndex = isSelected ? 0 : -1;
+      const focusWrap = document.createElement('span');
+      focusWrap.className = 'a11y-tab-focus';
+      const labelSpan = document.createElement('span');
+      labelSpan.className = 'a11y-tab-label';
+      labelSpan.textContent = tab.label;
+      focusWrap.appendChild(labelSpan);
+      btn.appendChild(focusWrap);
+      btn.addEventListener('click', () => switchScanInsightsTab(tab.key));
+      btn.addEventListener('keydown', event => handleTabKeydown(event, index));
+      scanInsightsState.tabButtons.push(btn);
+      tabList.appendChild(btn);
+
+      const panel = document.createElement('div');
+      panel.className = 'a11y-tabpanel a11y-scan-insights-panel';
+      panel.id = panelId;
+      panel.dataset.tabKey = tab.key;
+      panel.setAttribute('role','tabpanel');
+      panel.setAttribute('aria-labelledby', tabId);
+  panel.tabIndex = -1;
+      panel.hidden = !isSelected;
+      panelsWrap.appendChild(panel);
+      scanInsightsState.panels.set(tab.key, panel);
+      if (isSelected) {
+        renderScanInsightsTabContent(tab.key, panel);
+      }
+    });
+
+    const footerNote = document.createElement('p');
+    footerNote.className = 'a11y-scan-insights-footer-note';
+    footerNote.textContent = 'Insights update automatically when scan data is refreshed.';
+    footer.appendChild(footerNote);
+
+    ensureScanInsightsData().catch(err => console.warn('Scan insights load failed', err));
+  }
+
+  function cleanupScanInsightsDialog() {
+    cancelScanInsightsFetch({ dropData: false });
+    scanInsightsState.panels = new Map();
+    scanInsightsState.tabButtons = [];
+    scanInsightsState.subtitleEl = null;
+    scanInsightsState.filterButton = null;
+    scanInsightsState.dialog = null;
+  }
+
+  function switchScanInsightsTab(tabKey) {
+    if (!tabKey || scanInsightsState.activeTab === tabKey) return;
+    scanInsightsState.activeTab = tabKey;
+    if (scanInsightsState.tabButtons?.length) {
+      scanInsightsState.tabButtons.forEach(btn => {
+        const isActive = btn.dataset.tabKey === tabKey;
+        btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+        btn.tabIndex = isActive ? 0 : -1;
+      });
+    }
+    const targetPanel = scanInsightsState.panels.get(tabKey);
+    scanInsightsState.panels.forEach((panel, key) => {
+      if (!panel) return;
+      panel.hidden = key !== tabKey;
+    });
+    renderScanInsightsTabContent(tabKey, targetPanel);
+    ensureScanInsightsData().catch(err => console.warn('Scan insights tab load issue', err));
+  }
+
+  function renderScanInsightsTabContent(tabKey, overrideTarget) {
+    const target = overrideTarget || scanInsightsState.panels.get(tabKey);
+    if (!target) return;
+    target.innerHTML = '';
+    scanInsightsState.activeTab = tabKey;
+
+    const status = scanInsightsState.status;
+    if (status === 'loading') {
+      target.appendChild(buildScanInsightsLoadingView());
+      return;
+    }
+    if (status === 'error') {
+      target.appendChild(buildScanInsightsErrorView(scanInsightsState.error || 'Unable to load insights.'));
+      return;
+    }
+    if (status !== 'ready' || !scanInsightsState.data) {
+      target.appendChild(buildScanInsightsPreface(tabKey));
+      return;
+    }
+
+    if (tabKey === 'scoreTrend') {
+      renderScanInsightsScoreTrendTab(target, scanInsightsState.data);
+    } else if (tabKey === 'progress') {
+      renderScanInsightsProgressTab(target, scanInsightsState.data);
+    } else if (tabKey === 'coverage') {
+      renderScanInsightsCoverageTab(target, scanInsightsState.data);
+    } else {
+      renderScanInsightsHealthTab(target, scanInsightsState.data);
+    }
+  }
+
+  function getScanDetailContext(scanIdFromPath) {
+    const scanId = coerceNumber(scanIdFromPath, null);
+    if (scanId == null) return null;
+    return {
+      scanId: String(scanId),
+      runNumber: detectActiveRunNumber(),
+      detectedAt: Date.now()
+    };
+  }
+
+  function detectActiveRunNumber() {
+    const params = new URLSearchParams(location.search || '');
+    const paramKeys = ['runNumber','scanRun','run'];
+    for (const key of paramKeys) {
+      const value = params.get(key);
+      const parsed = extractRunNumberFromText(value);
+      if (parsed != null) return parsed;
+    }
+    const attributeSelectors = [
+      '[data-run-number]','[data-current-run]','[data-selected-run]',
+      '[data-scan-run]','[data-current-run-number]','[data-testid="scan-run-selector"] [aria-current="true"]'
+    ];
+    for (const selector of attributeSelectors) {
+      const el = document.querySelector(selector);
+      const parsed = extractRunNumberFromElement(el);
+      if (parsed != null) return parsed;
+    }
+    const textSelectors = [
+      '[data-testid="scan-run-summary"]','[data-testid="scan-run-label"]',
+      '.scan-run-selector [aria-current="true"]','.scan-run-selector [aria-pressed="true"]',
+      '.monitor-page-header h1','header h1'
+    ];
+    for (const selector of textSelectors) {
+      const el = document.querySelector(selector);
+      const parsed = extractRunNumberFromText(el?.textContent);
+      if (parsed != null) return parsed;
+    }
+    return null;
+  }
+
+  function resetScanInsightsData() {
+    cancelScanInsightsFetch({ dropData: true });
+    scanInsightsState.error = '';
+    scanInsightsState.tabCache = createScanInsightsTabCache();
+  }
+
+  function cancelScanInsightsFetch({ dropData = false } = {}) {
+    if (scanInsightsState.abortController) {
+      try {
+        scanInsightsState.abortController.abort();
+      } catch (err) {
+        // ignore abort errors
+      }
+      scanInsightsState.abortController = null;
+    }
+    if (scanInsightsState.tabCache) {
+      Object.values(scanInsightsState.tabCache).forEach(tab => {
+        if (!tab) return;
+        if (tab.controller) {
+          try {
+            tab.controller.abort();
+          } catch (err) {
+            // ignore abort errors
+          }
+          tab.controller = null;
+        }
+        tab.promise = null;
+        if (dropData) {
+          Object.assign(tab, createScanInsightsTabState());
+        } else if (tab.status === 'loading') {
+          tab.status = tab.data ? 'ready' : 'idle';
+        }
+      });
+    }
+    if (scanInsightsState.pageCountAbortController) {
+      try {
+        scanInsightsState.pageCountAbortController.abort();
+      } catch (err) {
+        // ignore abort errors
+      }
+      scanInsightsState.pageCountAbortController = null;
+    }
+    scanInsightsState.pageCountPromise = null;
+    scanInsightsState.loadPromise = null;
+    if (dropData) {
+      scanInsightsState.data = null;
+      scanInsightsState.status = 'idle';
+    } else if (scanInsightsState.status === 'loading') {
+      scanInsightsState.status = scanInsightsState.data ? 'ready' : 'idle';
+    }
+  }
+
+  function ensureScanInsightsData() {
+    const context = scanInsightsState.context;
+    if (!context || !context.scanId) {
+      const error = new Error('Missing scan details.');
+      scanInsightsState.status = 'error';
+      scanInsightsState.error = error.message;
+      return Promise.reject(error);
+    }
+    if (
+      scanInsightsState.status === 'ready' &&
+      scanInsightsState.data?.scanId === context.scanId &&
+      (context.runNumber == null || scanInsightsState.data?.latest?.runNumber === context.runNumber)
+    ) {
+      return Promise.resolve(scanInsightsState.data);
+    }
+    if (scanInsightsState.status === 'loading' && scanInsightsState.loadPromise) {
+      return scanInsightsState.loadPromise;
+    }
+    const controller = new AbortController();
+    scanInsightsState.abortController = controller;
+    scanInsightsState.status = 'loading';
+    scanInsightsState.error = '';
+    const loadPromise = fetchScanInsightsData(context, { signal: controller.signal })
+      .then(data => {
+        scanInsightsState.data = data;
+        scanInsightsState.status = 'ready';
+        if (enablePageSummaryApiForMetrics) {
+          scheduleRunPageSummaryAugmentation(data);
+        }
+        if (scanInsightsState.runHistoryScrapePromise) {
+          scanInsightsState.runHistoryScrapePromise.catch(() => {});
+        }
+        if (isScanDetailPage) {
+          const scrapePromise = scrapeRunHistoryCountsFromUi(data).catch(err =>
+            console.warn('Scan history scraping failed', err)
+          );
+          scanInsightsState.runHistoryScrapePromise = scrapePromise.finally(() => {
+            if (scanInsightsState.runHistoryScrapePromise === scrapePromise) {
+              scanInsightsState.runHistoryScrapePromise = null;
+            }
+          });
+        }
+        return data;
+      })
+      .catch(err => {
+        if (controller.signal.aborted) {
+          scanInsightsState.status = 'idle';
+        } else {
+          scanInsightsState.status = 'error';
+          scanInsightsState.error = err?.message || 'Unable to load scan insights.';
+        }
+        throw err;
+      })
+      .finally(() => {
+        if (scanInsightsState.abortController === controller) {
+          scanInsightsState.abortController = null;
+        }
+        scanInsightsState.loadPromise = null;
+        renderScanInsightsTabContent(scanInsightsState.activeTab);
+      });
+    scanInsightsState.loadPromise = loadPromise;
+    renderScanInsightsTabContent(scanInsightsState.activeTab);
+    return loadPromise;
+  }
+
+  function ensureProgressInsightsDetails() {
+    const base = scanInsightsState.data;
+    const tab = getScanInsightsTabState('progress');
+    if (!base?.latest || !base?.previous) {
+      tab.status = 'error';
+      tab.error = 'At least two completed runs are required to compare progress.';
+      return Promise.reject(new Error(tab.error));
+    }
+    const runKey = `${base.latest.runNumber}-${base.previous.runNumber}`;
+    if (tab.status === 'ready' && tab.key === runKey && tab.data) {
+      return Promise.resolve(tab.data);
+    }
+    if (tab.status === 'loading' && tab.promise) {
+      return tab.promise;
+    }
+    const controller = new AbortController();
+    tab.controller = controller;
+    tab.status = 'loading';
+    tab.error = '';
+    const promise = loadProgressInsightsDetails(base, { signal: controller.signal })
+      .then(result => {
+        tab.data = result;
+        tab.key = runKey;
+        tab.status = 'ready';
+        tab.error = '';
+        return result;
+      })
+      .catch(err => {
+        if (controller.signal.aborted) {
+          tab.status = 'idle';
+        } else {
+          tab.status = 'error';
+          tab.error = err?.message || 'Unable to load progress insights.';
+        }
+        throw err;
+      })
+      .finally(() => {
+        if (tab.controller === controller) {
+          tab.controller = null;
+        }
+        tab.promise = null;
+        if (scanInsightsState.activeTab === 'progress') {
+          renderScanInsightsTabContent('progress');
+        }
+      });
+    tab.promise = promise;
+    if (scanInsightsState.activeTab === 'progress') {
+      renderScanInsightsTabContent('progress');
+    }
+    return promise;
+  }
+
+  function ensureCoverageInsightsDetails() {
+    const base = scanInsightsState.data;
+    const tab = getScanInsightsTabState('coverage');
+    if (!base?.latest) {
+      tab.status = 'error';
+      tab.error = 'A completed run is required to show coverage.';
+      return Promise.reject(new Error(tab.error));
+    }
+    const runKey = `${base.latest.runNumber}`;
+    if (tab.status === 'ready' && tab.key === runKey && tab.data) {
+      return Promise.resolve(tab.data);
+    }
+    if (tab.status === 'loading' && tab.promise) {
+      return tab.promise;
+    }
+    const controller = new AbortController();
+    tab.controller = controller;
+    tab.status = 'loading';
+    tab.error = '';
+    const promise = loadCoverageInsightsDetails(base, { signal: controller.signal })
+      .then(result => {
+        tab.data = result;
+        tab.key = runKey;
+        tab.status = 'ready';
+        tab.error = '';
+        return result;
+      })
+      .catch(err => {
+        if (controller.signal.aborted) {
+          tab.status = 'idle';
+        } else {
+          tab.status = 'error';
+          tab.error = err?.message || 'Unable to load coverage insights.';
+        }
+        throw err;
+      })
+      .finally(() => {
+        if (tab.controller === controller) {
+          tab.controller = null;
+        }
+        tab.promise = null;
+        if (scanInsightsState.activeTab === 'coverage') {
+          renderScanInsightsTabContent('coverage');
+        }
+      });
+    tab.promise = promise;
+    if (scanInsightsState.activeTab === 'coverage') {
+      renderScanInsightsTabContent('coverage');
+    }
+    return promise;
+  }
+
+  async function fetchScanInsightsData(context, { signal } = {}) {
+    const scanId = context?.scanId;
+    if (!scanId) throw new Error('Cannot load insights for an unknown scan.');
+    const params = new URLSearchParams();
+    params.set('needsReview','false');
+    params.set('pageSize','25');
+    params.set('pageNumber','1');
+    const payload = await fetchWasApi(`/scans/${scanId}/runs?${params.toString()}`, { signal });
+    const allRuns = getRunsArray(payload)
+      .map(run => mapRunForInsights(run))
+      .filter(Boolean)
+      .sort((a, b) => {
+        const aNum = a.runNumber ?? -Infinity;
+        const bNum = b.runNumber ?? -Infinity;
+        return bNum - aNum;
+      });
+    if (!allRuns.length) {
+      throw new Error('No runs available for this scan yet.');
+    }
+    const completedRuns = allRuns.filter(run => isRunCompleted(run));
+    if (!completedRuns.length) {
+      throw new Error('No completed runs available for this scan.');
+    }
+    const latest = completedRuns[0];
+    const previous = completedRuns[1] || null;
+    const oldest = completedRuns[2] || null;
+    const trend = buildTrendSeries(completedRuns, 10);
+    return {
+      scanId,
+      fetchedAt: Date.now(),
+      latest,
+      previous,
+      oldest,
+      completedRuns,
+      runs: allRuns,
+      trend
+    };
+  }
+
+  async function loadProgressInsightsDetails(baseData, { signal } = {}) {
+    const scanId = baseData?.scanId;
+    const latestRunNumber = baseData?.latest?.runNumber;
+    const previousRunNumber = baseData?.previous?.runNumber;
+    if (!scanId || latestRunNumber == null || previousRunNumber == null) {
+      throw new Error('Missing run metadata for progress insights.');
+    }
+    const [latestIssues, previousIssues] = await Promise.all([
+      fetchRunIssuesForInsights(scanId, latestRunNumber, { signal }),
+      fetchRunIssuesForInsights(scanId, previousRunNumber, { signal })
+    ]);
+    const diff = diffIssueCollections(latestIssues.records, previousIssues.records);
+    return {
+      runKey: `${latestRunNumber}-${previousRunNumber}`,
+      latestRunNumber,
+      previousRunNumber,
+      comparedIssues: {
+        latest: latestIssues.records.length,
+        previous: previousIssues.records.length,
+        truncatedLatest: latestIssues.truncated,
+        truncatedPrevious: previousIssues.truncated
+      },
+      diff
+    };
+  }
+
+  async function loadCoverageInsightsDetails(baseData, { signal } = {}) {
+    const scanId = baseData?.scanId;
+    const latestRunNumber = baseData?.latest?.runNumber;
+    if (!scanId || latestRunNumber == null) {
+      throw new Error('Missing run metadata for coverage insights.');
+    }
+    const pagesResult = await fetchRunPagesForInsights(scanId, latestRunNumber, { signal });
+    const stats = summarizePageInsights(pagesResult.records, baseData?.latest);
+    if (stats && stats.runPageCounts == null) {
+      const cached = getCachedRunPageSummary(scanId, latestRunNumber);
+      if (cached) {
+        stats.runPageCounts = convertRunPageSummaryToCounts(cached);
+      }
+    }
+    if (stats && !pagesResult.truncated) {
+      const summary = {
+        totalPages: stats.total,
+        completedPages: stats.withIssues + stats.healthy,
+        completedWithIssues: stats.withIssues,
+        completedWithoutIssues: stats.healthy,
+        failedPages: stats.failed
+      };
+      if (enablePageSummaryApiForMetrics) {
+        cacheRunPageSummary(scanId, latestRunNumber, summary);
+        applyRunPageSummary(baseData.latest, summary);
+      }
+      stats.runPageCounts = convertRunPageSummaryToCounts(summary);
+      syncCoverageStatsWithRunSummary(latestRunNumber, summary);
+    }
+    return {
+      runKey: `${latestRunNumber}`,
+      latestRunNumber,
+      pages: pagesResult.records,
+      truncated: pagesResult.truncated,
+      stats
+    };
+  }
+
+  function buildTrendSeries(runs, limit = 10) {
+    if (!Array.isArray(runs)) return [];
+    const slice = runs.slice(0, Math.max(1, limit));
+    const ordered = slice.slice().reverse();
+    return ordered.map(entry => ({
+      runNumber: entry.runNumber,
+      score: entry.score,
+      totalIssues: entry.totalIssues,
+      critical: entry.issueCounts.critical,
+      serious: entry.issueCounts.serious,
+      startedAt: entry.startedAt,
+      completedAt: entry.completedAt
+    }));
+  }
+
+  function mapRunForInsights(run) {
+    if (!run) return null;
+    const runNumber = getRunNumberValue(run);
+    if (runNumber == null) return null;
+    const startedAt = pickRunTimestamp(run, ['started','startedAt','startTime','createdAt']);
+    const completedAt = pickRunTimestamp(run, ['completed','completedAt','endTime','finishedAt','updatedAt']);
+    const status = String(run?.status || run?.state || '').trim();
+    const score = getRunScoreValue(run);
+    const issueCounts = getRunIssueCounts(run);
+    const pageCounts = getRunPageCounts(run);
+    const totalIssues = issueCounts.critical + issueCounts.serious + issueCounts.moderate + issueCounts.minor;
+    const totalPages = deriveRunTotalPages(run, pageCounts);
+    const durationSeconds = deriveRunDurationSeconds(startedAt, completedAt);
+    const startedLabel = startedAt ? startedAt.toISOString() : null;
+    const completedLabel = completedAt ? completedAt.toISOString() : null;
+    return {
+      runNumber,
+      status,
+      score,
+      issueCounts,
+      pageCounts,
+      totalIssues,
+      totalPages,
+      startedAt,
+      completedAt,
+      startedLabel,
+      completedLabel,
+      durationSeconds,
+      raw: run
+    };
+  }
+
+  async function fetchRunIssuesForInsights(scanId, runNumber, { limit = scanInsightsIssueLimit, signal } = {}) {
+    return fetchRunResourceCollection({
+      scanId,
+      runNumber,
+      resource: 'issues',
+      limit,
+      pageSize: scanInsightsIssuePageSize,
+      signal,
+      mapItems: getIssuesArrayFromPayload,
+      mapRecord: mapRunIssueRecord
+    });
+  }
+
+  async function fetchRunPagesForInsights(scanId, runNumber, { limit = scanInsightsPageLimit, signal } = {}) {
+    return fetchRunResourceCollection({
+      scanId,
+      runNumber,
+      resource: 'pages',
+      limit,
+      pageSize: scanInsightsPagePageSize,
+      signal,
+      mapItems: getPagesArrayFromPayload,
+      mapRecord: mapRunPageRecord
+    });
+  }
+
+  async function fetchRunResourceCollection({
+    scanId,
+    runNumber,
+    resource,
+    limit = 500,
+    pageSize = 100,
+    signal,
+    mapItems,
+    mapRecord
+  }) {
+    if (!scanId || runNumber == null) {
+      throw new Error('Missing scan or run details.');
+    }
+    const records = [];
+    let pageNumber = 1;
+    let nextToken = null;
+    let truncated = false;
+    while (records.length < limit) {
+      const remaining = limit - records.length;
+      const size = Math.max(1, Math.min(pageSize, remaining));
+      const params = new URLSearchParams();
+      params.set('pageSize', String(size));
+      params.set('pageNumber', String(pageNumber));
+      params.set('needsReview','false');
+      if (nextToken) params.set('pageToken', nextToken);
+      const path = `/scans/${scanId}/runs/${runNumber}/${resource}?${params.toString()}`;
+      const payload = await fetchWasApi(path, { signal });
+      const items = typeof mapItems === 'function' ? mapItems(payload) : [];
+      if (!items.length) break;
+      items.forEach(item => {
+        if (!item) return;
+        const mapped = typeof mapRecord === 'function' ? mapRecord(item) : item;
+        if (mapped) records.push(mapped);
+      });
+      const meta = derivePaginationMeta(payload);
+      if (records.length >= limit) {
+        truncated = true;
+        break;
+      }
+      const hasNextToken = Boolean(meta.nextPageToken);
+      const hasExplicitNext = Boolean(meta.hasNext);
+      if (hasNextToken) {
+        nextToken = meta.nextPageToken;
+      } else if (hasExplicitNext) {
+        pageNumber += 1;
+        nextToken = null;
+      } else if (!items.length) {
+        break;
+      } else {
+        pageNumber += 1;
+        nextToken = null;
+      }
+    }
+    return { records, truncated };
+  }
+
+  function makeRunPageSummaryCacheKey(scanId, runNumber, includeNeedsReview = false) {
+    return `${scanId || ''}|${runNumber ?? ''}|${includeNeedsReview ? 'review' : 'open'}`;
+  }
+
+  function getCachedRunPageSummary(scanId, runNumber, includeNeedsReview = false) {
+    const key = makeRunPageSummaryCacheKey(scanId, runNumber, includeNeedsReview);
+    return runPageSummaryCache.get(key) || null;
+  }
+
+  function cacheRunPageSummary(scanId, runNumber, summary, includeNeedsReview = false) {
+    if (!scanId || runNumber == null || !summary) return;
+    const key = makeRunPageSummaryCacheKey(scanId, runNumber, includeNeedsReview);
+    runPageSummaryCache.set(key, summary);
+  }
+
+  function convertRunPageSummaryToCounts(summary) {
+    if (!summary) return null;
+    const total = summary.completedPages ?? summary.totalPages ?? null;
+    let withIssues = summary.completedWithIssues ?? null;
+    let withoutIssues = summary.completedWithoutIssues ?? null;
+    if (total != null) {
+      if (withIssues == null && withoutIssues != null) {
+        withIssues = Math.max(0, total - withoutIssues);
+      } else if (withoutIssues == null && withIssues != null) {
+        withoutIssues = Math.max(0, total - withIssues);
+      }
+    }
+    if (withIssues == null && withoutIssues == null && total == null) {
+      return null;
+    }
+    return {
+      withIssues,
+      withoutIssues,
+      total
+    };
+  }
+
+  function areRunPageSummariesEquivalent(previous, next) {
+    if (previous === next) return true;
+    if (!previous || !next) return false;
+    const numericKeys = [
+      'totalPages',
+      'completedPages',
+      'completedWithIssues',
+      'completedWithoutIssues',
+      'failedPages',
+      'openIssueSum'
+    ];
+    return numericKeys.every(key => {
+      const prevVal = previous[key];
+      const nextVal = next[key];
+      if (prevVal == null && nextVal == null) return true;
+      const prevNum = coerceNumber(prevVal, Number.NaN);
+      const nextNum = coerceNumber(nextVal, Number.NaN);
+      const prevIsNum = Number.isFinite(prevNum);
+      const nextIsNum = Number.isFinite(nextNum);
+      if (prevIsNum || nextIsNum) {
+        return prevIsNum && nextIsNum && prevNum === nextNum;
+      }
+      return prevVal === nextVal;
+    });
+  }
+
+  function applyRunPageSummary(run, summary, { preferGreaterTotals = true } = {}) {
+    if (!run || !summary) return false;
+    const existingCounts = run.pageCounts || {};
+    const targetCounts = { ...existingCounts };
+    let changed = false;
+    const previousSummary = run.pageIssueSummary || null;
+    const counts = convertRunPageSummaryToCounts(summary);
+    const shouldUse = (nextValue, currentValue) => {
+      if (!preferGreaterTotals) return true;
+      const nextNum = coerceNumber(nextValue, Number.NaN);
+      const currentNum = coerceNumber(currentValue, Number.NaN);
+      if (Number.isNaN(nextNum)) return false;
+      if (Number.isNaN(currentNum)) return true;
+      return nextNum >= currentNum;
+    };
+    if (counts) {
+      if (counts.withIssues != null && shouldUse(counts.withIssues, existingCounts.withIssues)) {
+        if (targetCounts.withIssues !== counts.withIssues) changed = true;
+        targetCounts.withIssues = counts.withIssues;
+      }
+      if (counts.withoutIssues != null && shouldUse(counts.withoutIssues, existingCounts.withoutIssues)) {
+        if (targetCounts.withoutIssues !== counts.withoutIssues) changed = true;
+        targetCounts.withoutIssues = counts.withoutIssues;
+      }
+      if (counts.total != null && shouldUse(counts.total, existingCounts.total)) {
+        if (targetCounts.total !== counts.total) changed = true;
+        targetCounts.total = counts.total;
+      }
+    }
+    if (changed || !run.pageCounts) {
+      run.pageCounts = targetCounts;
+    }
+    if (
+      summary.completedPages != null &&
+      shouldUse(summary.completedPages, run.totalPages)
+    ) {
+      if (run.totalPages !== summary.completedPages) changed = true;
+      run.totalPages = summary.completedPages;
+    }
+    const summaryChanged = !areRunPageSummariesEquivalent(previousSummary, summary);
+    run.pageIssueSummary = summary;
+    if (summaryChanged) changed = true;
+    logScanInsightsDebug('Applied run page summary', {
+      runNumber: run?.runNumber ?? run?.raw?.runNumber ?? null,
+      changed,
+      summary,
+      counts: run.pageCounts,
+      totalPages: run.totalPages
+    });
+    return changed;
+  }
+
+  function syncCoverageStatsWithRunSummary(runNumber, summary) {
+    if (!summary) return;
+    const tab = getScanInsightsTabState('coverage');
+    if (!tab?.data || tab.data.latestRunNumber == null) return;
+    if (tab.data.latestRunNumber !== runNumber) return;
+    if (!tab.data.stats) return;
+    tab.data.stats.runPageCounts = convertRunPageSummaryToCounts(summary);
+  }
+
+  async function fetchRunPageIssueSummary(scanId, runNumber, { signal, includeNeedsReview = false } = {}) {
+    if (!scanId || runNumber == null) return null;
+    const cached = getCachedRunPageSummary(scanId, runNumber, includeNeedsReview);
+    if (cached) {
+      logScanInsightsDebug('Using cached run page summary', {
+        scanId,
+        runNumber,
+        includeNeedsReview,
+        summary: cached
+      });
+      return cached;
+    }
+    logScanInsightsDebug('Fetching run page summary', { scanId, runNumber, includeNeedsReview });
+    const maxRateLimitRetries = 5;
+    const rateLimitBaseDelayMs = 750;
+    const rateLimitMaxDelayMs = 8000;
+    const summary = {
+      totalPages: 0,
+      completedPages: 0,
+      completedWithIssues: 0,
+      completedWithoutIssues: 0,
+      failedPages: 0,
+      openIssueSum: 0
+    };
+    let pageNumber = 1;
+    let nextToken = null;
+    while (true) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      const params = new URLSearchParams();
+      params.set('pageSize', String(scanInsightsPagePageSize));
+      params.set('pageNumber', String(pageNumber));
+      params.set('needsReview', includeNeedsReview ? 'true' : 'false');
+      if (nextToken) params.set('pageToken', nextToken);
+      const path = `/scans/${scanId}/runs/${runNumber}/pages?${params.toString()}`;
+      let payload;
+      let retryCount = 0;
+      while (true) {
+        try {
+          payload = await fetchWasApi(path, { signal });
+          break;
+        } catch (err) {
+          if (isRateLimitError(err) && retryCount < maxRateLimitRetries) {
+            const delayMs = Math.min(
+              rateLimitMaxDelayMs,
+              rateLimitBaseDelayMs * Math.pow(2, retryCount)
+            );
+            retryCount += 1;
+            logScanInsightsDebug('Rate limit hit while fetching page summary; backing off', {
+              scanId,
+              runNumber,
+              includeNeedsReview,
+              pageNumber,
+              attempt: retryCount,
+              delayMs,
+              error: err?.message || String(err)
+            });
+            await delay(delayMs);
+            continue;
+          }
+          throw err;
+        }
+      }
+      const items = getPagesArrayFromPayload(payload);
+      if (!items.length) break;
+      items.forEach(item => {
+        const page = mapRunPageRecord(item);
+        if (!page) return;
+        summary.totalPages += 1;
+        const statusText = String(page.status || '').trim();
+        const isCompleted = page.isCompleted != null ? page.isCompleted : /complete/i.test(statusText);
+        const isFailed = page.isFailed != null ? page.isFailed : /fail/i.test(statusText);
+        if (isCompleted) {
+          summary.completedPages += 1;
+          const openIssues = Math.max(0, coerceNumber(page.openIssues ?? page.totalIssues, 0));
+          if (openIssues > 0) {
+            summary.completedWithIssues += 1;
+            summary.openIssueSum += openIssues;
+          } else {
+            summary.completedWithoutIssues += 1;
+          }
+        } else if (isFailed) {
+          summary.failedPages += 1;
+        }
+      });
+      logScanInsightsDebug('Processed page summary batch', {
+        scanId,
+        runNumber,
+        includeNeedsReview,
+        pageNumber,
+        items: items.length,
+        totals: {
+          totalPages: summary.totalPages,
+          completed: summary.completedPages,
+          withIssues: summary.completedWithIssues,
+          withoutIssues: summary.completedWithoutIssues,
+          failed: summary.failedPages
+        }
+      });
+      const meta = derivePaginationMeta(payload);
+      const hasNextToken = Boolean(meta.nextPageToken);
+      const hasExplicitNext = Boolean(meta.hasNext);
+      if (hasNextToken) {
+        nextToken = meta.nextPageToken;
+      } else if (hasExplicitNext) {
+        pageNumber += 1;
+        nextToken = null;
+      } else if (!items.length) {
+        break;
+      } else {
+        pageNumber += 1;
+        nextToken = null;
+      }
+    }
+    cacheRunPageSummary(scanId, runNumber, summary, includeNeedsReview);
+    logScanInsightsDebug('Completed run page summary fetch', {
+      scanId,
+      runNumber,
+      includeNeedsReview,
+      summary
+    });
+    return summary;
+  }
+
+  async function augmentRunsWithPageIssueCounts(scanId, runs, { signal, includeNeedsReview = false } = {}) {
+    if (!scanId || !Array.isArray(runs) || !runs.length) return false;
+    const targets = runs.filter(run => run && run.runNumber != null);
+    if (!targets.length) return false;
+    let changed = false;
+    let index = 0;
+    const concurrency = Math.min(runPageSummaryConcurrency, targets.length);
+    const worker = async () => {
+      while (index < targets.length) {
+        const currentIndex = index++;
+        const run = targets[currentIndex];
+        if (!run) continue;
+        try {
+          const summary = await fetchRunPageIssueSummary(scanId, run.runNumber, { signal, includeNeedsReview });
+          if (summary) {
+            const updated = applyRunPageSummary(run, summary);
+            if (updated) changed = true;
+            syncCoverageStatsWithRunSummary(run.runNumber, summary);
+          }
+        } catch (err) {
+          if (signal?.aborted) return;
+          console.warn('Unable to derive pages with issues for run', run?.runNumber, err);
+        }
+      }
+    };
+    await Promise.all(new Array(concurrency).fill(null).map(() => worker()));
+    return changed;
+  }
+
+  function scheduleRunPageSummaryAugmentation(baseData) {
+    if (!enablePageSummaryApiForMetrics) return;
+    if (!baseData?.scanId || !Array.isArray(baseData.completedRuns)) return;
+    if (scanInsightsState.pageCountAbortController) {
+      try {
+        scanInsightsState.pageCountAbortController.abort();
+      } catch (err) {
+        // ignore abort errors
+      }
+      scanInsightsState.pageCountAbortController = null;
+    }
+    const controller = new AbortController();
+    scanInsightsState.pageCountAbortController = controller;
+    const promise = augmentRunsWithPageIssueCounts(baseData.scanId, baseData.completedRuns, {
+      signal: controller.signal,
+      includeNeedsReview: false
+    })
+      .then(changed => {
+        if (changed && scanInsightsState.status === 'ready') {
+          renderScanInsightsTabContent(scanInsightsState.activeTab);
+        }
+      })
+      .catch(err => {
+        if (controller.signal.aborted) return;
+        console.warn('Scan insights page summary enrichment failed', err);
+      })
+      .finally(() => {
+        if (scanInsightsState.pageCountAbortController === controller) {
+          scanInsightsState.pageCountAbortController = null;
+        }
+        scanInsightsState.pageCountPromise = null;
+      });
+    scanInsightsState.pageCountPromise = promise;
+  }
+
+  async function scrapeRunHistoryCountsFromUi(baseData, { limit = 3 } = {}) {
+    if (!isScanDetailPage) return;
+    if (!baseData?.completedRuns?.length) return;
+    let entries = [];
+    try {
+      entries = await collectRunHistoryMenuEntries({ limit });
+    } catch (err) {
+      console.warn('Scan history menu scrape failed', err);
+      return;
+    }
+    if (!entries.length) return;
+    const runs = baseData.completedRuns;
+    let changed = false;
+    const summaryLogs = [];
+    let prevPanelSnapshot = readRunPageCountValues();
+    for (let index = 0; index < entries.length; index++) {
+      const entry = entries[index];
+      const run = runs[index];
+      if (!run || !entry) continue;
+      let panelCounts = prevPanelSnapshot;
+      try {
+        const selected = await selectRunHistoryMenuEntryByIndex(index);
+        if (selected) {
+          const updated = await waitForRunPageCountUpdate(prevPanelSnapshot, { timeoutMs: 5000 });
+          if (updated) {
+            panelCounts = updated;
+            prevPanelSnapshot = updated;
+          }
+        }
+      } catch (err) {
+        console.warn('Unable to select run history entry for scraping', err);
+      }
+      const derivedTotals = panelCounts?.scanned ?? entry.completedPages ?? null;
+      const derivedWithIssues = panelCounts?.withIssues ?? null;
+      const derivedWithoutIssues = panelCounts?.withoutIssues ?? null;
+      const summary = {
+        totalPages: derivedTotals,
+        completedPages: derivedTotals,
+        completedWithIssues: derivedWithIssues ?? derivedTotals,
+        completedWithoutIssues: derivedWithoutIssues,
+        failedPages: null,
+        openIssueSum: entry.totalIssues ?? panelCounts?.withIssues ?? null
+      };
+      if (
+        summary.totalPages == null &&
+        summary.completedWithIssues == null &&
+        summary.completedWithoutIssues == null
+      ) {
+        logScanInsightsDebug('Skipping run history entry with insufficient data', { entry });
+        continue;
+      }
+      const applied = applyRunPageSummary(run, summary, { preferGreaterTotals: true });
+      if (applied) changed = true;
+      if (run.totalPages == null && summary.totalPages != null) {
+        run.totalPages = summary.totalPages;
+      }
+      if (run.totalIssues == null && Number.isFinite(entry.totalIssues)) {
+        run.totalIssues = entry.totalIssues;
+      }
+      logScanInsightsDebug('Applied run history UI entry', {
+        runNumber: run?.runNumber ?? run?.raw?.runNumber ?? null,
+        entry,
+        panelCounts
+      });
+      summaryLogs.push({
+        runNumber: run?.runNumber ?? null,
+        completedPages: entry.completedPages,
+        totalIssues: entry.totalIssues,
+        panelCounts
+      });
+    }
+    logScanInsightsDebug('Run history scrape summary', {
+      entryCount: entries.length,
+      appliedRuns: summaryLogs
+    });
+    if (!changed) {
+      logScanInsightsDebug('Run history scrape completed with no changes', { entryCount: entries.length });
+    }
+    if (changed && scanInsightsState.status === 'ready') {
+      renderScanInsightsTabContent(scanInsightsState.activeTab);
+    }
+  }
+
+  function mapRunIssueRecord(record) {
+    if (!record || typeof record !== 'object') return null;
+    const pick = (...keys) => {
+      for (const key of keys) {
+        if (record[key] != null) return record[key];
+      }
+      return null;
+    };
+    const ruleId = pick('ruleId','ruleID','rule','axeRuleId','axeRuleID','id');
+    const description = pick('ruleSummary','summary','description','title','help','message') || ruleId || 'Issue';
+    const impact = normalizeImpactLabel(pick('impact','severity','priority','issueImpact','issueSeverity','level'));
+    const pageUrl =
+      pick('pageUrl','url','targetPage','pageUri','page','location','href','issueUrl') || '';
+    const pageTitle = pick('pageTitle','title','pageName','name') || '';
+    const target = pick('target','selector','element','cssSelector','xpath','nodeTarget','snippet');
+    const status = pick('status','issueStatus','state') || '';
+    const nodeCount = coerceNumber(pick('elementCount','nodeCount','occurrenceCount','instances','count'), 1) || 1;
+    const fingerprint = buildIssueFingerprint({ ruleId, description, pageUrl, target });
+    return {
+      id: pick('id','issueId','uid','issueKey') || fingerprint,
+      ruleId: ruleId || description,
+      description,
+      impact,
+      pageUrl,
+      pageTitle,
+      target,
+      nodeCount,
+      status,
+      fingerprint
+    };
+  }
+
+  function normalizeImpactLabel(value) {
+    const text = String(value || '').toLowerCase();
+    if (!text) return 'unknown';
+    if (text.includes('critical') || text.includes('impact3') || text.includes('high')) return 'critical';
+    if (text.includes('serious') || text.includes('impact2') || text.includes('mediumhigh')) return 'serious';
+    if (text.includes('moderate') || text.includes('impact1') || text.includes('medium')) return 'moderate';
+    if (text.includes('minor') || text.includes('impact0') || text.includes('low')) return 'minor';
+    if (text.includes('review')) return 'needsReview';
+    return text;
+  }
+
+  function buildIssueFingerprint(parts) {
+    const norm = value => normalizeKeyFragment(value || '');
+    const segments = [norm(parts?.ruleId || parts?.description), norm(parts?.pageUrl), norm(parts?.target)];
+    const key = segments.filter(Boolean).join('|');
+    if (key) return key;
+    return norm(parts?.ruleId || parts?.description || parts?.pageUrl || parts?.target || Math.random());
+  }
+
+  function diffIssueCollections(latestIssues, previousIssues) {
+    const prevMap = new Map();
+    const latestMap = new Map();
+    const newIssues = [];
+    const resolvedIssues = [];
+    (previousIssues || []).forEach(issue => {
+      if (!issue || !issue.fingerprint) return;
+      prevMap.set(issue.fingerprint, issue);
+    });
+    (latestIssues || []).forEach(issue => {
+      if (!issue || !issue.fingerprint) return;
+      latestMap.set(issue.fingerprint, issue);
+      if (!prevMap.has(issue.fingerprint)) {
+        newIssues.push(issue);
+      }
+    });
+    (previousIssues || []).forEach(issue => {
+      if (!issue || !issue.fingerprint) return;
+      if (!latestMap.has(issue.fingerprint)) {
+        resolvedIssues.push(issue);
+      }
+    });
+    const summaryByImpact = summarizeIssuesByImpact(newIssues, resolvedIssues);
+    const aggregatesByRule = buildIssueAggregateEntries(newIssues, resolvedIssues, { mode: 'rule' });
+    const aggregatesByPage = buildIssueAggregateEntries(newIssues, resolvedIssues, { mode: 'page' });
+    return {
+      newIssues,
+      resolvedIssues,
+      summaryByImpact,
+      totals: {
+        newCount: newIssues.length,
+        resolvedCount: resolvedIssues.length,
+        net: newIssues.length - resolvedIssues.length
+      },
+      ruleRegressions: aggregatesByRule.regressions,
+      ruleRemediations: aggregatesByRule.remediations,
+      pageRegressions: aggregatesByPage.regressions,
+      pageImprovements: aggregatesByPage.remediations
+    };
+  }
+
+  function summarizeIssuesByImpact(newIssues, resolvedIssues) {
+    const impacts = ['critical','serious','moderate','minor','needsReview'];
+    const summary = {};
+    impacts.forEach(impact => {
+      summary[impact] = { impact, newCount: 0, resolvedCount: 0, net: 0, weight: scanInsightsIssueWeights[impact] || 1 };
+    });
+    newIssues.forEach(issue => {
+      const key = impacts.includes(issue.impact) ? issue.impact : 'minor';
+      summary[key].newCount += 1;
+    });
+    resolvedIssues.forEach(issue => {
+      const key = impacts.includes(issue.impact) ? issue.impact : 'minor';
+      summary[key].resolvedCount += 1;
+    });
+    Object.values(summary).forEach(entry => {
+      entry.net = entry.newCount - entry.resolvedCount;
+    });
+    return summary;
+  }
+
+  function buildIssueAggregateEntries(newIssues, resolvedIssues, { mode } = {}) {
+    const map = new Map();
+    const makeEntry = issue => {
+      if (mode === 'page') {
+        return {
+          key: buildIssueFingerprint({ ruleId: issue.pageUrl || issue.pageTitle, pageUrl: issue.pageUrl, target: issue.target }),
+          type: 'page',
+          pageUrl: issue.pageUrl || '',
+          pageTitle: issue.pageTitle || issue.pageUrl || 'Untitled page',
+          newCount: 0,
+          resolvedCount: 0,
+          delta: 0
+        };
+      }
+      return {
+        key: `${normalizeKeyFragment(issue.ruleId || issue.description)}|${issue.impact || 'unknown'}`,
+        type: 'rule',
+        ruleId: issue.ruleId || issue.description || 'Rule',
+        ruleSummary: issue.description || issue.ruleId || 'Rule',
+        impact: issue.impact || 'unknown',
+        pages: new Set(),
+        newCount: 0,
+        resolvedCount: 0,
+        delta: 0
+      };
+    };
+    const getKey = issue => {
+      if (!issue) return null;
+      if (mode === 'page') {
+        return normalizeKeyFragment(issue.pageUrl || issue.pageTitle || issue.target || issue.ruleId);
+      }
+      return `${normalizeKeyFragment(issue.ruleId || issue.description)}|${issue.impact || 'unknown'}`;
+    };
+    const adjust = (issue, field) => {
+      const key = getKey(issue);
+      if (!key) return;
+      let entry = map.get(key);
+      if (!entry) {
+        entry = makeEntry(issue);
+        map.set(key, entry);
+      }
+      entry[field] += 1;
+      entry.delta = entry.newCount - entry.resolvedCount;
+      if (entry.pages instanceof Set && issue.pageUrl) {
+        entry.pages.add(issue.pageUrl);
+      }
+    };
+    newIssues.forEach(issue => adjust(issue, 'newCount'));
+    resolvedIssues.forEach(issue => adjust(issue, 'resolvedCount'));
+    const formatEntry = entry => {
+      if (entry.pages instanceof Set) {
+        entry.pageSamples = Array.from(entry.pages).slice(0, 4);
+      }
+      delete entry.pages;
+      return entry;
+    };
+    const regressions = [];
+    const remediations = [];
+    map.forEach(entry => {
+      if (entry.delta > 0) {
+        regressions.push(formatEntry(entry));
+      } else if (entry.delta < 0) {
+        remediations.push(formatEntry(entry));
+      }
+    });
+    regressions.sort((a, b) => b.delta - a.delta || b.newCount - a.newCount);
+    remediations.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta) || b.resolvedCount - a.resolvedCount);
+    return { regressions, remediations };
+  }
+
+  function mapRunPageRecord(record) {
+    if (!record || typeof record !== 'object') return null;
+    const pick = (...keys) => {
+      for (const key of keys) {
+        if (record[key] != null) return record[key];
+      }
+      return null;
+    };
+    const bool = value => value === true || (typeof value === 'string' && value.toLowerCase() === 'true');
+    const counts = {
+      critical: coerceNumber(pick('totalCriticalIssues','criticalIssues','critical'), 0),
+      serious: coerceNumber(pick('totalSeriousIssues','seriousIssues','serious'), 0),
+      moderate: coerceNumber(pick('totalModerateIssues','moderateIssues','moderate'), 0),
+      minor: coerceNumber(pick('totalMinorIssues','minorIssues','minor'), 0),
+      needsReview: coerceNumber(pick('totalNeedsReview','needsReview'), 0)
+    };
+    const totalIssues = counts.critical + counts.serious + counts.moderate + counts.minor;
+    const openIssues = coerceNumber(pick('totalOpenIssues','openIssues','currentOpenIssues'), 0);
+    const statusText = String(pick('status','pageStatus','state') || '').trim();
+    const isCompleted = /complete/i.test(statusText);
+    const isFailed = /fail/i.test(statusText);
+    return {
+      pageId: pick('pageId','id'),
+      url: pick('url','pageUrl','pageUri','href') || '',
+      title: pick('title','pageTitle','name') || '',
+      status: statusText,
+      failureReason: pick('reasonForFailure','failureReason','errorMessage','error') || '',
+      template: bool(pick('template','isTemplate','templatePage')),
+      counts,
+      totalIssues,
+      openIssues,
+      isCompleted,
+      isFailed,
+      needsReview: counts.needsReview,
+      health: pick('health','pageHealth'),
+      source: pick('scriptStep','scriptName','pageSource','source') || '',
+      domainUrl: pick('domainUrl','domain') || '',
+      weightedScore: 5 * counts.critical + 3 * counts.serious + counts.moderate
+    };
+  }
+
+  function summarizePageInsights(pages, latestRun) {
+    const stats = {
+      total: Array.isArray(pages) ? pages.length : 0,
+      healthy: 0,
+      withIssues: 0,
+      failed: 0,
+      templateCount: 0,
+      standardCount: 0,
+      templateIssues: 0,
+      standardIssues: 0,
+      statusCounts: new Map(),
+      totalIssues: 0,
+      topPages: [],
+      cleanPages: [],
+      latestPageCounts: latestRun?.pageCounts || null,
+      runPageCounts: null
+    };
+    stats.runPageCounts = buildRunPageCountSnapshot(stats.latestPageCounts, latestRun);
+    if (!Array.isArray(pages) || !pages.length) {
+      return stats;
+    }
+    pages.forEach(page => {
+      if (!page) return;
+      const statusLabel = (page.status || 'Unknown').trim() || 'Unknown';
+      const isCompleted = page.isCompleted != null ? page.isCompleted : /complete/i.test(page.status || '');
+      const isFailed = page.isFailed != null ? page.isFailed : /fail/i.test(page.status || '');
+      const issuesForStats = Math.max(0, coerceNumber(page.openIssues ?? page.totalIssues, 0));
+      stats.totalIssues += issuesForStats;
+      if (isCompleted) {
+        if (issuesForStats > 0) {
+          stats.withIssues += 1;
+        } else {
+          stats.healthy += 1;
+          if (stats.cleanPages.length < 8) stats.cleanPages.push(page);
+        }
+      } else if (isFailed) {
+        stats.failed += 1;
+      }
+      if (page.template) {
+        stats.templateCount += 1;
+        stats.templateIssues += issuesForStats;
+      } else {
+        stats.standardCount += 1;
+        stats.standardIssues += issuesForStats;
+      }
+      stats.statusCounts.set(statusLabel, (stats.statusCounts.get(statusLabel) || 0) + 1);
+    });
+    stats.averageIssuesPerPage = stats.withIssues ? stats.totalIssues / stats.withIssues : 0;
+    stats.topPages = selectTopPagesByIssues(pages, { limit: 8 });
+    return stats;
+  }
+
+  function buildRunPageCountSnapshot(pageCounts, latestRun) {
+    if (!pageCounts && latestRun?.totalPages == null) return null;
+    const normalized = {};
+    const assign = (key, value) => {
+      const num = coerceNumber(value, Number.NaN);
+      if (Number.isFinite(num)) {
+        normalized[key] = Math.max(0, num);
+      }
+    };
+    assign('withIssues', pageCounts?.withIssues);
+    assign('withoutIssues', pageCounts?.withoutIssues);
+    assign('total', pageCounts?.total ?? latestRun?.totalPages);
+    if (normalized.total != null) {
+      if (normalized.withIssues != null && normalized.withoutIssues == null) {
+        normalized.withoutIssues = Math.max(0, normalized.total - normalized.withIssues);
+      } else if (normalized.withoutIssues != null && normalized.withIssues == null) {
+        normalized.withIssues = Math.max(0, normalized.total - normalized.withoutIssues);
+      }
+    }
+    return Object.keys(normalized).length ? normalized : null;
+  }
+
+  function selectTopPagesByIssues(pages, { limit = 8 } = {}) {
+    if (!Array.isArray(pages)) return [];
+    const sorted = pages.slice().sort((a, b) => {
+      const aScore = (a.counts?.critical || 0) * 5 + (a.counts?.serious || 0) * 3 + (a.counts?.moderate || 0) + (a.counts?.minor || 0) * 0.5;
+      const bScore = (b.counts?.critical || 0) * 5 + (b.counts?.serious || 0) * 3 + (b.counts?.moderate || 0) + (b.counts?.minor || 0) * 0.5;
+      if (bScore !== aScore) return bScore - aScore;
+      return (b.totalIssues || 0) - (a.totalIssues || 0);
+    });
+    return sorted.slice(0, Math.max(1, limit));
+  }
+
+  function isRunCompleted(run) {
+    const status = typeof run?.status === 'string' ? run.status : run?.raw?.status;
+    return /complete/i.test(String(status || ''));
+  }
+
+  function pickRunTimestamp(run, keys) {
+    for (const key of keys) {
+      const value = run?.[key];
+      if (!value) continue;
+      const parsed = parseInsightDate(value);
+      if (parsed) return parsed;
+    }
+    return null;
+  }
+
+  function parseInsightDate(value) {
+    if (!value) return null;
+    const ts = Date.parse(value);
+    if (!Number.isNaN(ts)) return new Date(ts);
+    return null;
+  }
+
+  function deriveRunDurationSeconds(startedAt, completedAt) {
+    if (!startedAt || !completedAt) return null;
+    const diff = (completedAt.getTime() - startedAt.getTime()) / 1000;
+    if (!Number.isFinite(diff) || diff < 0) return null;
+    return diff;
+  }
+
+  function getRunScoreValue(run) {
+    const candidates = [
+      run?.score,
+      run?.scanScore,
+      run?.scorePercent,
+      run?.accessibilityScore,
+      run?.averageScore,
+      run?.runScore,
+      run?.metrics?.score
+    ];
+    for (const value of candidates) {
+      const num = coerceNumber(value, Number.NaN);
+      if (!Number.isNaN(num)) return Math.max(0, Math.min(100, num));
+    }
+    return null;
+  }
+
+  function getRunIssueCounts(run) {
+    const issues =
+      run?.issues ||
+      run?.issueCounts ||
+      run?.issueSummary ||
+      run?.metrics ||
+      {};
+    const get = (...keys) => {
+      for (const key of keys) {
+        if (issues && issues[key] != null) {
+          const num = coerceNumber(issues[key], Number.NaN);
+          if (!Number.isNaN(num)) return Math.max(0, num);
+        }
+      }
+      return 0;
+    };
+    return {
+      critical: get('critical','impactCritical','impact3','crit','criticalIssues'),
+      serious: get('serious','impactSerious','impact2','seriousIssues'),
+      moderate: get('moderate','impactModerate','impact1','moderateIssues'),
+      minor: get('minor','impactMinor','impact0','minorIssues'),
+      needsReview: get('needsReview','needs_review','needs-review','review','needsReviewIssues')
+    };
+  }
+
+  function getRunPageCounts(run) {
+    const pages =
+      run?.pages ||
+      run?.pageCounts ||
+      run?.pageMetrics ||
+      run?.metrics?.pages ||
+      {};
+    const critical = extractPageImpactCountFromMetrics(pages, 'critical') ?? 0;
+    const serious = extractPageImpactCountFromMetrics(pages, 'serious') ?? 0;
+    const moderate = extractPageImpactCountFromMetrics(pages, 'moderate') ?? 0;
+    const minor = extractPageImpactCountFromMetrics(pages, 'minor') ?? 0;
+    const needsReview = extractPageImpactCountFromMetrics(pages, 'needsreview') ?? 0;
+    const withIssuesMetric =
+      extractPageImpactCountFromMetrics(pages, 'withissues') ??
+      extractPageImpactCountFromMetrics(pages, 'issuepages') ??
+      null;
+    const withoutIssuesMetric =
+      extractPageImpactCountFromMetrics(pages, 'withoutissues') ??
+      extractPageImpactCountFromMetrics(pages, 'noissues') ??
+      extractPageImpactCountFromMetrics(pages, 'cleanpages') ??
+      null;
+    const coerceMetric = value => {
+      const num = coerceNumber(value, Number.NaN);
+      return Number.isFinite(num) ? Math.max(0, num) : null;
+    };
+    const totalFromPages = coerceMetric(pages.total ?? pages.pages ?? pages.pagesTotal ?? pages.totalPages);
+    const totalPagesCount = totalFromPages ?? coerceMetric(run?.totalPages);
+    const derivedWithIssues =
+      totalPagesCount != null && withoutIssuesMetric != null
+        ? Math.max(0, totalPagesCount - withoutIssuesMetric)
+        : null;
+    const severitySum = critical + serious + moderate + minor;
+    const withIssues =
+      (withIssuesMetric != null ? withIssuesMetric : null) ??
+      (derivedWithIssues != null ? derivedWithIssues : null) ??
+      (severitySum > 0 ? severitySum : null);
+    const withoutIssues =
+      (withoutIssuesMetric != null ? withoutIssuesMetric : null) ??
+      (totalPagesCount != null && withIssues != null ? Math.max(0, totalPagesCount - withIssues) : null);
+    return {
+      critical: critical || 0,
+      serious: serious || 0,
+      moderate: moderate || 0,
+      minor: minor || 0,
+      needsReview: needsReview || 0,
+      withIssues: withIssues,
+      withoutIssues: withoutIssues,
+      total: totalPagesCount,
+      raw: pages
+    };
+  }
+
+  function deriveRunTotalPages(run, pageCounts) {
+    const candidates = [
+      run?.totalPages,
+      run?.pagesTotal,
+      run?.pages?.total,
+      run?.pageCount,
+      run?.pagesScanned,
+      run?.metrics?.totalPages,
+      pageCounts?.raw?.total
+    ];
+    for (const value of candidates) {
+      const num = coerceNumber(value, Number.NaN);
+      if (!Number.isNaN(num)) return Math.max(0, num);
+    }
+    const sum =
+      (pageCounts?.critical || 0) +
+      (pageCounts?.serious || 0) +
+      (pageCounts?.moderate || 0) +
+      (pageCounts?.minor || 0);
+    return sum || null;
+  }
+
+  function getRunNumberValue(run) {
+    const candidates = [run?.runNumber, run?.run, run?.id];
+    for (const value of candidates) {
+      const num = coerceNumber(value, Number.NaN);
+      if (!Number.isNaN(num)) return num;
+    }
+    return null;
+  }
+
+  function extractRunNumberFromElement(element) {
+    if (!element) return null;
+    const attributes = [
+      'data-run-number','data-current-run','data-selected-run','data-scan-run','data-value'
+    ];
+    for (const attr of attributes) {
+      const value = element.getAttribute?.(attr);
+      const parsed = extractRunNumberFromText(value);
+      if (parsed != null) return parsed;
+    }
+    const datasetCandidates = ['runNumber','run','scanRun','value'];
+    if (element.dataset) {
+      for (const key of datasetCandidates) {
+        if (key in element.dataset) {
+          const parsed = extractRunNumberFromText(element.dataset[key]);
+          if (parsed != null) return parsed;
+        }
+      }
+    }
+    return extractRunNumberFromText(element.textContent);
+  }
+
+  function extractRunNumberFromText(value) {
+    if (!value) return null;
+    const match = String(value).match(/(?:run|#)?\s*(\d{1,6})/i);
+    if (!match) return null;
+    const parsed = Number.parseInt(match[1], 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
 
   const msPerHour = 1000 * 60 * 60;
   const msPerDay = msPerHour * 24;
@@ -588,6 +4213,8 @@
       display: flex;
       flex-direction: column;
       border: 1px solid #dcdcdc;
+      overflow: hidden;
+      box-sizing: border-box;
     }
 
     .a11y-scan-report-header {
@@ -1234,6 +4861,681 @@
       margin-top: 0.45rem;
       font-weight: 600;
       font-size: 0.9rem;
+    }
+    .a11y-scan-insights-dialog {
+      width: min(1000px, 95vw);
+    }
+    .a11y-scan-insights-header {
+      padding-top: 4px;
+    }
+    .a11y-scan-insights-subtitle {
+      margin: 0;
+      font-size: 13px;
+      color: #4b5563;
+    }
+    .a11y-scan-insights-tabs {
+      display: flex;
+      gap: 0.5rem;
+      padding: 0 1rem 0.5rem;
+      border-bottom: 1px solid rgba(15,23,42,0.08);
+      flex-wrap: wrap;
+      flex-shrink: 0;
+    }
+    .a11y-scan-insights-tab {
+      border: none;
+      background: transparent;
+      padding: 0.35rem 0.9rem;
+      border-radius: 999px;
+      font-weight: 600;
+      font-size: 0.9rem;
+      color: #475569;
+      cursor: pointer;
+      transition: background 0.2s ease, color 0.2s ease;
+    }
+    .a11y-scan-insights-tab.is-active {
+      background: #111827;
+      color: #fff;
+    }
+    .a11y-scan-insights-content {
+      padding: 1rem 1.25rem;
+      min-height: 220px;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+    }
+    .a11y-scan-insights-placeholder {
+      margin: 0;
+      font-size: 0.95rem;
+      color: #4b5563;
+    }
+    .a11y-scan-insights-figure {
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+    .a11y-scan-insights-figure figcaption {
+      font-size: 0.85rem;
+      color: #475569;
+    }
+    .a11y-scan-insights-note {
+      margin: 0.35rem 0;
+      font-size: 0.85rem;
+      color: #475569;
+    }
+    .a11y-scan-insights-section {
+      margin: 1rem 0 1.25rem;
+      padding-top: 0.5rem;
+      border-top: 1px solid rgba(15,23,42,0.08);
+    }
+    .a11y-scan-insights-section h3 {
+      margin: 0 0 0.75rem;
+      font-size: 1rem;
+      color: #0f172a;
+    }
+    .a11y-scan-insights-summary-grid,
+    .a11y-scan-insights-metric-grid,
+    .a11y-scan-insights-coverage-grid {
+      display: grid;
+      gap: 0.75rem;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    }
+    .a11y-scan-insights-summary-grid {
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    }
+    .a11y-scan-insights-impact-card {
+      position: relative;
+      border: 1px solid rgba(15,23,42,0.08);
+      border-radius: 16px;
+      padding: 1.65rem 1.25rem 1.25rem;
+      background: #fff;
+      box-shadow: 0 8px 24px rgba(15,23,42,0.08);
+      min-height: 190px;
+      overflow: hidden;
+    }
+    .a11y-scan-insights-impact-card::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 0.25rem;
+      background-color: #cbd5f5;
+    }
+    .a11y-scan-insights-impact-card .a11y-scan-insights-impact-icon {
+      position: absolute;
+      top: -1.25em;
+      right: -1em;
+      width: 75px;
+      height: 75px;
+      border-radius: 999px;
+      border: 2px dotted currentColor;
+      padding: 1.5em;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      box-sizing: border-box;
+      opacity: 0.95;
+      background: rgba(255,255,255,0.85);
+    }
+    .a11y-scan-insights-impact-card.impact-positive {
+      color: #4fa630;
+    }
+    .a11y-scan-insights-impact-card.impact-negative {
+      color: #d93251;
+    }
+    .a11y-scan-insights-impact-card.impact-neutral {
+      color: #94a3b8;
+    }
+    .a11y-scan-insights-impact-card.impact-positive::after {
+      background-color: #4fa630;
+    }
+    .a11y-scan-insights-impact-card.impact-negative::after {
+      background-color: #d93251;
+    }
+    .a11y-scan-insights-impact-value {
+      margin: 0;
+      font-size: 2.25rem;
+      line-height: 1.1;
+      font-weight: 700;
+      color: #111827;
+    }
+    .a11y-scan-insights-impact-label {
+      margin: 0.35rem 0 0;
+      font-size: 1rem;
+      font-weight: 600;
+      color: #1f2937;
+    }
+    .a11y-scan-insights-impact-divider {
+      margin: 0.9rem 0 0.6rem;
+      border: none;
+      border-top: 1px solid rgba(15,23,42,0.12);
+    }
+    .a11y-scan-insights-impact-trend {
+      margin: 0;
+      font-size: 0.95rem;
+      color: #475569;
+    }
+    .a11y-scan-insights-card {
+      border: 1px solid rgba(15,23,42,0.08);
+      border-radius: 10px;
+      padding: 0.75rem 0.9rem;
+      background: #fff;
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+      box-shadow: 0 1px 2px rgba(15,23,42,0.08);
+    }
+    .a11y-scan-insights-card.is-status {
+      border-left: 4px solid var(--accent-primary);
+    }
+    .a11y-scan-insights-card-label {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #64748b;
+      margin: 0;
+    }
+    .a11y-scan-insights-card-value {
+      font-size: 1.45rem;
+      font-weight: 600;
+      margin: 0;
+      color: #111827;
+    }
+    .a11y-scan-insights-card-hint {
+      margin: 0;
+      color: #475569;
+      font-size: 0.85rem;
+    }
+    .a11y-scan-insights-card-desc {
+      margin: 0;
+      color: #0f172a;
+      font-size: 0.85rem;
+    }
+    .a11y-scan-insights-delta {
+      margin-top: auto;
+      font-size: 0.85rem;
+    }
+    .a11y-scan-insights-delta-value {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-weight: 600;
+      padding: 0.15rem 0.4rem;
+      border-radius: 999px;
+      background: #e2e8f0;
+      color: #0f172a;
+    }
+    .a11y-scan-insights-delta-value.is-positive {
+      background: rgba(34,197,94,0.15);
+      color: #15803d;
+    }
+    .a11y-scan-insights-delta-value.is-negative {
+      background: rgba(248,113,113,0.18);
+      color: #b91c1c;
+    }
+    .a11y-scan-insights-delta-value.is-neutral {
+      background: rgba(148,163,184,0.25);
+      color: #475569;
+    }
+    .a11y-scan-insights-delta-direction {
+      margin-left: 0.4rem;
+      font-size: 0.7rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .a11y-scan-insights-loading,
+    .a11y-scan-insights-error {
+      border: 1px solid rgba(148,163,184,0.4);
+      border-radius: 10px;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      align-items: flex-start;
+      background: #f8fafc;
+    }
+    .a11y-scan-insights-loading {
+      align-items: center;
+      text-align: center;
+    }
+    .a11y-scan-insights-spinner {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      border: 3px solid rgba(59,130,246,0.25);
+      border-top-color: #3b82f6;
+      animation: a11y-spin 0.9s linear infinite;
+    }
+    @keyframes a11y-spin {
+      to { transform: rotate(360deg); }
+    }
+    .a11y-scan-insights-error-actions {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    .a11y-scan-insights-trend {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .a11y-scan-insights-trend svg {
+      width: 100%;
+      max-width: 100%;
+      height: auto;
+      background: #fff;
+      border: 1px solid rgba(148,163,184,0.35);
+      border-radius: 8px;
+      padding: 0.5rem;
+    }
+    .a11y-scan-insights-trend-axis {
+      stroke: rgba(148,163,184,0.7);
+      stroke-width: 1;
+    }
+    .a11y-scan-insights-trend-line {
+      fill: none;
+      stroke: var(--accent-primary);
+      stroke-width: 2.2;
+    }
+    .a11y-scan-insights-trend-dot {
+      fill: #fff;
+      stroke: var(--accent-primary);
+      stroke-width: 2;
+    }
+    .a11y-scan-insights-trend-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      gap: 0.25rem;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    }
+    .a11y-scan-insights-trend-list li {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.5rem;
+      font-size: 0.9rem;
+      border-bottom: 1px dashed rgba(148,163,184,0.4);
+      padding-bottom: 0.25rem;
+    }
+    .a11y-scan-insights-trend-run {
+      font-weight: 600;
+      color: #0f172a;
+    }
+    .a11y-scan-insights-trend-value {
+      color: #475569;
+      font-variant-numeric: tabular-nums;
+    }
+    .a11y-scan-insights-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.92rem;
+      background: #fff;
+      border: 1px solid rgba(148,163,184,0.4);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .a11y-scan-insights-table th,
+    .a11y-scan-insights-table td {
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid rgba(226,232,240,0.8);
+      text-align: left;
+    }
+    .a11y-scan-insights-table thead th {
+      background: #f1f5f9;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #475569;
+    }
+    .a11y-scan-insights-table caption {
+      caption-side: bottom;
+      text-align: left;
+      font-size: 0.8rem;
+      color: #475569;
+      padding: 0.35rem 0.75rem 0;
+    }
+    .a11y-scan-insights-table tr.is-current-run {
+      background: rgba(59,130,246,0.08);
+    }
+    .a11y-scan-insights-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .a11y-scan-insights-list-head {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+    .a11y-scan-insights-list-title {
+      font-weight: 600;
+      color: #0f172a;
+      flex: 1;
+    }
+    .a11y-scan-insights-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      padding: 0.15rem 0.5rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      background: rgba(148,163,184,0.25);
+      color: #475569;
+      white-space: nowrap;
+    }
+    .a11y-scan-insights-pill.is-critical {
+      background: rgba(239,68,68,0.18);
+      color: #b91c1c;
+    }
+    .a11y-scan-insights-pill.is-serious {
+      background: rgba(249,115,22,0.2);
+      color: #c2410c;
+    }
+    .a11y-scan-insights-pill.is-moderate {
+      background: rgba(251,191,36,0.2);
+      color: #92400e;
+    }
+    .a11y-scan-insights-pill.is-minor {
+      background: rgba(34,197,94,0.15);
+      color: #15803d;
+    }
+    .a11y-scan-insights-pill.is-needsReview {
+      background: rgba(59,130,246,0.15);
+      color: #1d4ed8;
+    }
+    .a11y-scan-insights-pill.is-positive {
+      background: rgba(16,185,129,0.18);
+      color: #047857;
+    }
+    .a11y-scan-insights-pill.is-negative {
+      background: rgba(248,113,113,0.2);
+      color: #b91c1c;
+    }
+    .a11y-scan-insights-pill.is-neutral {
+      background: rgba(148,163,184,0.35);
+      color: #475569;
+    }
+    .a11y-scan-insights-two-col {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    }
+    .a11y-scan-insights-subsection {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+    .a11y-scan-insights-subheading {
+      margin: 0;
+      font-size: 0.8rem;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .a11y-scan-insights-link {
+      color: var(--accent-primary);
+      text-decoration: none;
+    }
+    .a11y-scan-insights-link:hover {
+      text-decoration: underline;
+    }
+    .a11y-scan-insights-clean-list {
+      margin: 0;
+      padding-left: 1.25rem;
+      display: grid;
+      gap: 0.25rem;
+      list-style: decimal;
+    }
+    .a11y-scan-insights-table tbody tr:last-child th,
+    .a11y-scan-insights-table tbody tr:last-child td {
+      border-bottom: none;
+    }
+    .a11y-scan-insights-meta-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 0.35rem 1rem;
+      margin: 0;
+    }
+    .a11y-scan-insights-meta-list dt {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      color: #94a3b8;
+      margin: 0;
+    }
+    .a11y-scan-insights-meta-list dd {
+      margin: 0 0 0.4rem;
+      font-weight: 600;
+      color: #0f172a;
+    }
+    .a11y-scan-insights-line {
+      display: grid;
+      grid-template-columns: auto minmax(280px, 1fr);
+      gap: 0.75rem 1rem;
+      align-items: end;
+      overflow-x: auto;
+    }
+    .a11y-scan-insights-line-chart {
+      width: 100%;
+      max-width: 100%;
+      min-width: 300px;
+      border: 1px solid rgba(148,163,184,0.4);
+      border-radius: 10px;
+      background: #fff;
+      padding: 0.5rem 0.75rem;
+      height: 250px;
+      box-sizing: border-box;
+    }
+    .a11y-scan-insights-axis-labels {
+      grid-column: 1 / 2;
+      grid-row: 1 / 2;
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      justify-content: center;
+      font-size: 0.85rem;
+      color: #475569;
+    }
+    .a11y-scan-insights-line-chart {
+      grid-column: 2 / 3;
+      grid-row: 1 / 2;
+    }
+    .a11y-scan-insights-axis-label.is-y-axis {
+      writing-mode: vertical-rl;
+      transform: rotate(180deg);
+      text-align: center;
+    }
+    .a11y-scan-insights-line-legend {
+      grid-column: 1 / -1;
+    }
+    .a11y-scan-insights-line-axis {
+      stroke: rgba(148,163,184,0.6);
+      stroke-width: 1;
+    }
+    .a11y-scan-insights-line-path {
+      fill: none;
+      stroke-width: 2.5;
+    }
+    .a11y-scan-insights-line-dot {
+      fill: #fff;
+      stroke-width: 2.5;
+    }
+    .a11y-scan-insights-line-dot.is-current {
+      fill: #1d4ed8;
+      stroke: #1d4ed8;
+    }
+    .a11y-scan-insights-line-point-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      fill: #0f172a;
+      text-shadow: 0 1px 2px rgba(255,255,255,0.9);
+    }
+    .a11y-scan-insights-line-legend {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 0.5rem;
+    }
+    .a11y-scan-insights-line-legend li {
+      display: flex;
+      flex-direction: column;
+      border: 1px solid rgba(148,163,184,0.4);
+      border-radius: 8px;
+      padding: 0.4rem 0.6rem;
+      background: #fff;
+      min-height: 64px;
+      justify-content: center;
+    }
+    .a11y-scan-insights-line-legend li.is-current-run {
+      border-color: rgba(59,130,246,0.6);
+      box-shadow: 0 0 0 1px rgba(59,130,246,0.2);
+    }
+    .a11y-scan-insights-line-label {
+      font-weight: 600;
+      color: #0f172a;
+    }
+    .a11y-scan-insights-line-subtitle {
+      color: #475569;
+      font-size: 0.85rem;
+    }
+    .a11y-scan-insights-line-value {
+      font-variant-numeric: tabular-nums;
+      color: #0f172a;
+      font-weight: 600;
+    }
+    .a11y-scan-insights-axis-labels {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 0.5rem;
+      font-size: 0.78rem;
+      color: #475569;
+      margin-top: -0.35rem;
+      padding: 0 0.4rem 0.2rem;
+    }
+    .a11y-scan-insights-axis-label {
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-weight: 600;
+    }
+    .a11y-scan-insights-axis-label.is-y-axis {
+      writing-mode: vertical-lr;
+      transform: rotate(180deg);
+      min-height: 120px;
+      align-self: stretch;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .a11y-scan-insights-axis-label.is-x-axis {
+      margin-left: auto;
+    }
+    .a11y-scan-insights-stack-wrapper {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .a11y-scan-insights-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+    }
+    .a11y-scan-insights-stack-row {
+      display: grid;
+      grid-template-columns: 120px 1fr 120px;
+      gap: 0.75rem;
+      align-items: center;
+    }
+    .a11y-scan-insights-stack-row.is-current-run {
+      background: rgba(59,130,246,0.08);
+      border-radius: 12px;
+      padding: 0.35rem 0.5rem;
+    }
+    .a11y-scan-insights-stack-label {
+      font-weight: 600;
+      color: #0f172a;
+    }
+    .a11y-scan-insights-stack-bar {
+      display: flex;
+      height: 18px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(226,232,240,0.5);
+    }
+    .a11y-scan-insights-stack-segment {
+      height: 100%;
+    }
+    .a11y-scan-insights-stack-segment.is-critical { background: #b91c1c; }
+    .a11y-scan-insights-stack-segment.is-serious { background: #ea580c; }
+    .a11y-scan-insights-stack-segment.is-moderate { background: #f59e0b; }
+    .a11y-scan-insights-stack-segment.is-minor { background: #0ea5e9; }
+    .a11y-scan-insights-stack-value {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      color: #475569;
+    }
+    .a11y-scan-insights-stack-high {
+      display: block;
+      font-size: 0.78rem;
+      color: #0f172a;
+    }
+    .a11y-scan-insights-stack-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 1rem;
+      font-size: 0.88rem;
+      color: #475569;
+    }
+    .a11y-scan-insights-stack-legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+    .a11y-scan-insights-stack-legend-item::before {
+      content: '';
+      width: 14px;
+      height: 8px;
+      border-radius: 999px;
+      display: inline-block;
+    }
+    .a11y-scan-insights-stack-legend-item.is-high::before {
+      background: linear-gradient(90deg, #b91c1c 0%, #ea580c 100%);
+    }
+    .a11y-scan-insights-stack-legend-item.is-critical::before { background: #b91c1c; }
+    .a11y-scan-insights-stack-legend-item.is-serious::before { background: #ea580c; }
+    .a11y-scan-insights-stack-legend-item.is-moderate::before { background: #f59e0b; }
+    .a11y-scan-insights-stack-legend-item.is-minor::before { background: #0ea5e9; }
+    .a11y-scan-insights-current-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.15rem;
+      padding: 0.05rem 0.4rem;
+      border-radius: 999px;
+      background: rgba(59,130,246,0.15);
+      color: #1d4ed8;
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-left: 0.4rem;
+    }
+    .a11y-scan-insights-table .has-current-label {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
     }
     .a11y-quick-actions-log summary .a11y-quick-actions-summary {
       margin-top: 0;
@@ -3647,7 +7949,9 @@
     const { body, footer, updateFilterButtonLabel } = modalContext;
     const activePanel = getActivePanelElement(body);
     const prevState = captureAccordionState(activePanel || body) || getDefaultAccordionState(currentTabKey);
-    renderBody(body, lastRenderedData, updateFilterButtonLabel, footer, prevState);
+    renderBody(body, lastRenderedData, updateFilterButtonLabel, footer, prevState, {
+      mode: modalContext?.mode || pageContext
+    });
     const refreshedPanel = getActivePanelElement(body);
     accordionStateByTab[currentTabKey] = captureAccordionState(refreshedPanel || body) || {};
     if ((currentTabKey === 'pages' || currentTabKey === 'issues') && pageImpactFilterState.button) {
@@ -6926,7 +11230,9 @@
       currentTabKey = desiredTab;
       const restoreState = accordionStateByTab[currentTabKey] || getDefaultAccordionState(currentTabKey);
       const data = await getBuildDataPromise();
-      renderBody(body, data, updateFilterButtonLabel, footer, restoreState);
+      renderBody(body, data, updateFilterButtonLabel, footer, restoreState, {
+        mode: modalContext?.mode || pageContext
+      });
       const newPanel = getActivePanelElement(body);
       accordionStateByTab[currentTabKey] = captureAccordionState(newPanel || body) || {};
       logWidget('refreshMainView complete', { tab: currentTabKey, rowCount: data?.rows?.length || 0 });
@@ -8139,7 +12445,12 @@
     return select;
   }
 
-  function renderBody(body, data, updateFilterButtonLabel, footer, previousAccordionState) {
+  function renderBody(body, data, updateFilterButtonLabel, footer, previousAccordionState, options = {}) {
+    const { mode = pageContext } = options || {};
+    if (mode === 'scanInsights') {
+      renderScanInsightsDialog(body, footer);
+      return;
+    }
     const {
       now = new Date(),
       rows = [],
@@ -10556,6 +14867,15 @@
   function getPagesArrayFromPayload(payload) {
     if (!payload) return [];
     if (Array.isArray(payload.pages)) return payload.pages;
+    if (Array.isArray(payload.data)) return payload.data;
+    if (Array.isArray(payload.items)) return payload.items;
+    if (Array.isArray(payload.results)) return payload.results;
+    return [];
+  }
+
+  function getIssuesArrayFromPayload(payload) {
+    if (!payload) return [];
+    if (Array.isArray(payload.issues)) return payload.issues;
     if (Array.isArray(payload.data)) return payload.data;
     if (Array.isArray(payload.items)) return payload.items;
     if (Array.isArray(payload.results)) return payload.results;
@@ -14062,7 +18382,9 @@
       try {
         const fresh = await buildData();
         accordionStateByTab[currentTabKey] = prevState || {};
-        renderBody(bodyEl, fresh, updateFilterButtonLabel, footerEl, prevState);
+        renderBody(bodyEl, fresh, updateFilterButtonLabel, footerEl, prevState, {
+          mode: modalContext?.mode || pageContext
+        });
         const activePanel = getActivePanelElement(bodyEl);
         accordionStateByTab[currentTabKey] = captureAccordionState(activePanel || bodyEl) || {};
         if (updateFilterButtonLabel) updateFilterButtonLabel(fresh);
@@ -14111,9 +18433,19 @@
   async function openModal(triggerButton, { mode = pageContext } = {}) {
     const dialogMode = mode || pageContext;
     const isScansDialog = dialogMode === 'scans';
-    logWidget('openModal requested', { dialogMode, isScansDialog });
-    const minimizeAriaLabel = isScansDialog ? 'Hide scan summary dialog' : 'Hide quick actions dialog';
-    const restoreLabel = isScansDialog ? 'Show scan summary' : 'Show quick actions';
+    const isScanInsightsDialog = dialogMode === 'scanInsights';
+    const isQuickActionsDialog = !isScansDialog && !isScanInsightsDialog;
+    logWidget('openModal requested', { dialogMode, isScansDialog, isScanInsightsDialog });
+    const minimizeAriaLabel = isScansDialog
+      ? 'Hide scan summary dialog'
+      : isScanInsightsDialog
+        ? 'Hide scan insights dialog'
+        : 'Hide quick actions dialog';
+    const restoreLabel = isScansDialog
+      ? 'Show scan summary'
+      : isScanInsightsDialog
+        ? 'Show scan insights'
+        : 'Show quick actions';
     let isMinimized = false;
     let restoreButton = null;
     let data = null;
@@ -14150,25 +18482,44 @@
 
     const dialog = document.createElement('div');
     dialog.className = 'a11y-scan-report-dialog';
+    if (isScanInsightsDialog) {
+      dialog.classList.add('a11y-scan-insights-dialog');
+      scanInsightsState.dialog = dialog;
+    }
     dialog.setAttribute('role','dialog');
     dialog.setAttribute('aria-modal','true');
     dialog.setAttribute('aria-labelledby','a11y-scan-report-title');
 
     const header = document.createElement('div');
     header.className = 'a11y-scan-report-header';
+    if (isScanInsightsDialog) {
+      header.classList.add('a11y-scan-insights-header');
+    }
 
     const left = document.createElement('div');
     left.className = 'a11y-scan-report-header-left';
     const h1 = document.createElement('h1');
     h1.id = 'a11y-scan-report-title';
-    h1.textContent = isScansDialog ? 'Accessibility Scan Summary' : 'Quick Actions';
+    h1.textContent = isScansDialog
+      ? 'Accessibility Scan Summary'
+      : isScanInsightsDialog
+        ? 'Scan insights'
+        : 'Quick Actions';
     left.appendChild(h1);
+    if (isScanInsightsDialog) {
+      const subtitle = document.createElement('p');
+      subtitle.className = 'a11y-scan-insights-subtitle';
+      left.appendChild(subtitle);
+      scanInsightsState.subtitleEl = subtitle;
+      updateScanInsightsSubtitle();
+    }
     header.appendChild(left);
 
     const actions = document.createElement('div');
     actions.className = 'a11y-scan-report-header-actions';
     let updateFilterButtonLabel = null;
-    if (isScansDialog) {
+    const shouldShowFilterButton = isScansDialog || isScanInsightsDialog;
+    if (shouldShowFilterButton) {
       const filterBtn = document.createElement('button');
       filterBtn.type = 'button';
       filterBtn.className = 'a11y-filter-button';
@@ -14180,49 +18531,58 @@
         </span>
         <span class="a11y-filter-label">Filters (0)</span>
       `;
-      filterBtn.setAttribute('aria-label','Filters (0)');
-      updateFilterButtonLabel = () => {
-        const activeCount =
-          (currentFilters.types.size || 0) +
-          (currentFilters.domains.size || 0) +
-          (currentFilters.statuses.size || 0);
-        const label = `Filters (${activeCount})`;
-        const span = filterBtn.querySelector('.a11y-filter-label');
-        if (span) span.textContent = label;
-        filterBtn.setAttribute('aria-label', label);
-      };
-      filterBtn.addEventListener('click', () => {
-        logWidget('Filter button clicked', {
-          activeFilterCounts: {
-            types: currentFilters.types.size,
-            domains: currentFilters.domains.size,
-            statuses: currentFilters.statuses.size
-          }
-        });
-        const openWithData = data => {
-          if (!data) {
-            alert('Unable to load filter data.');
+      if (isScanInsightsDialog) {
+        filterBtn.setAttribute('aria-disabled','true');
+        filterBtn.disabled = true;
+        filterBtn.title = 'Filters are not available on Scan insights.';
+        scanInsightsState.filterButton = filterBtn;
+      } else {
+        filterBtn.setAttribute('aria-label','Filters (0)');
+        updateFilterButtonLabel = () => {
+          const activeCount =
+            (currentFilters.types.size || 0) +
+            (currentFilters.domains.size || 0) +
+            (currentFilters.statuses.size || 0);
+          const label = `Filters (${activeCount})`;
+          const span = filterBtn.querySelector('.a11y-filter-label');
+          if (span) span.textContent = label;
+          filterBtn.setAttribute('aria-label', label);
+        };
+        filterBtn.addEventListener('click', () => {
+          logWidget('Filter button clicked', {
+            activeFilterCounts: {
+              types: currentFilters.types.size,
+              domains: currentFilters.domains.size,
+              statuses: currentFilters.statuses.size
+            }
+          });
+          const openWithData = data => {
+            if (!data) {
+              alert('Unable to load filter data.');
+              return;
+            }
+            openFilterModal(dialog, body, footer, data, updateFilterButtonLabel);
+          };
+          if (lastRenderedData) {
+            openWithData(lastRenderedData);
+            refreshMainView({ preserveState: true }).catch(err => {
+              logWidget('Filter button background refresh failed', err?.message || err);
+            });
             return;
           }
-          openFilterModal(dialog, body, footer, data, updateFilterButtonLabel);
-        };
-        if (lastRenderedData) {
-          openWithData(lastRenderedData);
-          refreshMainView({ preserveState: true }).catch(err => {
-            logWidget('Filter button background refresh failed', err?.message || err);
-          });
-          return;
-        }
-        refreshMainView({ preserveState: true })
-          .then(openWithData)
-          .catch(err => alert(err.message));
-      });
+          refreshMainView({ preserveState: true })
+            .then(openWithData)
+            .catch(err => alert(err.message));
+        });
+      }
       const filterHolder = document.createElement('div');
       filterHolder.className = 'a11y-header-filter-holder';
       filterHolder.appendChild(filterBtn);
-      const sourceToggle = buildPageImpactSourceToggleControl();
-      if (sourceToggle) {
-        filterHolder.appendChild(sourceToggle);
+      if (isScansDialog) {
+        const sourceToggle = buildPageImpactSourceToggleControl();
+        if (sourceToggle) {
+          filterHolder.appendChild(sourceToggle);
+        }
       }
       left.appendChild(filterHolder);
     }
@@ -14271,7 +18631,7 @@
     // Quick Actions needs to interact with the underlying Monitor UI (click
     // filters, bulk actions, etc.), so we must leave the page interactive while
     // that dialog is open.
-    if (isScansDialog) {
+    if (isScansDialog || isScanInsightsDialog) {
       setBackgroundInert(dialog);
     }
     modalContext = isScansDialog
@@ -14295,6 +18655,10 @@
       pageImpactFilterState.summaryEl = null;
       pageImpactFilterState.sourceSegment = null;
       pageImpactFilterState.sourceButtons = null;
+      if (isScanInsightsDialog) {
+        cleanupScanInsightsDialog();
+        scanInsightsState.trigger?.setAttribute('aria-expanded','false');
+      }
       if (isScansDialog) {
         setPageImpactSource(defaultPageImpactSource);
       }
@@ -14342,7 +18706,7 @@
       dialog.removeAttribute('hidden');
       dialog.removeAttribute('aria-hidden');
       overlay.style.display = '';
-      if (isScansDialog) {
+      if (isScansDialog || isScanInsightsDialog) {
         setBackgroundInert(dialog);
       }
       removeRestoreButton();
@@ -14375,15 +18739,30 @@
     document.addEventListener('keydown', onKeydown, true);
 
     Object.keys(accordionStateByTab).forEach(key => { delete accordionStateByTab[key]; });
-    currentTabKey = isScansDialog ? 'status' : 'quick';
     if (isScansDialog) {
+      currentTabKey = 'status';
       pageImpactFilterState.initialSourceEvaluated = false;
+    } else if (isQuickActionsDialog) {
+      currentTabKey = 'quick';
     }
-    const initialState = getDefaultAccordionState(currentTabKey);
-    renderBody(body, data, updateFilterButtonLabel, footer, initialState);
-    const activePanel = getActivePanelElement(body);
-    accordionStateByTab[currentTabKey] = captureAccordionState(activePanel || body) || initialState;
+    const initialState = isScanInsightsDialog ? {} : getDefaultAccordionState(currentTabKey);
+    renderBody(body, data, updateFilterButtonLabel, footer, initialState, { mode: dialogMode });
+    if (!isScanInsightsDialog) {
+      const activePanel = getActivePanelElement(body);
+      accordionStateByTab[currentTabKey] = captureAccordionState(activePanel || body) || initialState;
+    }
     closeBtn.focus();
+  }
+
+  if (isScanDetailPage) {
+    const scanDetailContext = getScanDetailContext(scanDetailMatch?.[1]);
+    if (!scanDetailContext) {
+      console.warn('[ScanInsights] Unable to determine scan detail context.');
+      return;
+    }
+    initScanDetailInsights(scanDetailContext);
+    console.log('Scan insights trigger injected on scan detail page.');
+    return;
   }
 
   // --- Launcher button ---
