@@ -36,6 +36,27 @@
     pagesWithIssues: new Map()
   };
 
+  const scoreGradePalette = {
+    A: '#6EE17D',
+    B: '#D6EC5F',
+    C: '#FCE33A',
+    D: '#F49A26',
+    F: '#D04230'
+  };
+
+  const scoreGradeScale = [
+    { min: 96, letter: 'A' },
+    { min: 90, letter: 'A-' },
+    { min: 87, letter: 'B+' },
+    { min: 84, letter: 'B' },
+    { min: 80, letter: 'B-' },
+    { min: 77, letter: 'C+' },
+    { min: 74, letter: 'C' },
+    { min: 70, letter: 'C-' },
+    { min: 67, letter: 'D+' },
+    { min: 65, letter: 'D' }
+  ];
+
   // Creates an empty cache entry for each tab so we can hydrate lazily without re-allocating structures.
   function createScanInsightsTabCache() {
     return {
@@ -120,6 +141,11 @@
     const multipliers = { k: 1e3, m: 1e6, b: 1e9 };
     const multiplier = multipliers[suffix] || 1;
     return value * multiplier;
+  }
+
+  function statusIndicatesNoResults(value) {
+    if (!value) return false;
+    return /\bno\s+results?\b/i.test(String(value));
   }
 
   function findRunHistoryTriggerElement() {
@@ -510,6 +536,144 @@
     return container;
   }
 
+  function buildScanInsightsSnapshotCards(data) {
+    const latest = data?.latest;
+    if (!latest) return null;
+    const groups = [
+      buildSnapshotGroup('Snapshot', buildSnapshotOverviewCards(latest)),
+      buildSnapshotGroup('Issue snapshot', buildIssueSnapshotCards(latest)),
+      buildSnapshotGroup('Pages snapshot', buildPageSnapshotCards(latest))
+    ].filter(Boolean);
+    if (!groups.length) return null;
+    const wrapper = document.createElement('div');
+    wrapper.className = 'a11y-scan-insights-snapshot-row';
+    wrapper.setAttribute('role','region');
+    wrapper.setAttribute('aria-label','Scan snapshot overview');
+    groups.forEach(group => wrapper.appendChild(group));
+    return wrapper;
+  }
+
+  function buildSnapshotGroup(title, cards) {
+    const normalized = (cards || []).filter(Boolean);
+    if (!normalized.length) return null;
+    const group = document.createElement('section');
+    group.className = 'a11y-scan-insights-snapshot-group';
+    const heading = document.createElement('h3');
+    heading.textContent = title;
+    group.appendChild(heading);
+    const grid = document.createElement('div');
+    grid.className = 'a11y-scan-insights-snapshot-grid';
+    normalized.forEach(card => grid.appendChild(card));
+    group.appendChild(grid);
+    return group;
+  }
+
+  function buildSnapshotOverviewCards(latest) {
+    const cards = [];
+    const scorePercent = getScorePercent(latest);
+    const grade = getScoreLetterGrade(scorePercent);
+    const scoreCard = createMetricCard({
+      label: 'Accessibility score',
+      value: formatScoreValue(scorePercent),
+      hint: grade ? `Grade ${grade}` : null
+    });
+    enhanceSnapshotScoreCard(scoreCard, scorePercent);
+    cards.push(scoreCard);
+
+    const completedHint = formatDateTimeLabel(latest?.completedAt) || 'Completion pending';
+    cards.push(
+      createMetricCard({
+        label: 'Latest run',
+        value: formatRunLabel(latest),
+        hint: completedHint
+      })
+    );
+
+    const statusLabel = capitalizeFirstLetter(latest?.status || '');
+    cards.push(
+      createMetricCard({
+        label: 'Run duration',
+        value: formatDuration(latest?.durationSeconds),
+        hint: statusLabel || null
+      })
+    );
+    return cards;
+  }
+
+  function buildIssueSnapshotCards(latest) {
+    const cards = [];
+    cards.push(
+      createMetricCard({
+        label: 'Total issues',
+        value: formatNumberValue(latest?.totalIssues)
+      })
+    );
+    const highImpact = calculateHighImpactCount(latest);
+    cards.push(
+      createMetricCard({
+        label: 'High-impact issues',
+        value: formatNumberValue(highImpact)
+      })
+    );
+    const issueCounts = latest?.issueCounts || {};
+    const needsReviewCount = coerceNumber(issueCounts.needsReview, Number.NaN);
+    cards.push(
+      createMetricCard({
+        label: 'Needs review issues',
+        value: formatNumberValue(needsReviewCount)
+      })
+    );
+    return cards;
+  }
+
+  function buildPageSnapshotCards(latest) {
+    const cards = [];
+    const pageCounts = latest?.pageCounts || {};
+    const completedPages = getCompletedPageCount(latest);
+    const fallbackTotal = coerceNumber(pageCounts.total ?? latest?.totalPages, Number.NaN);
+    const pagesScanned = Number.isFinite(completedPages)
+      ? completedPages
+      : Number.isFinite(fallbackTotal)
+        ? fallbackTotal
+        : null;
+    cards.push(
+      createMetricCard({
+        label: 'Pages scanned',
+        value: formatNumberValue(pagesScanned)
+      })
+    );
+    const pagesWithIssues = calculatePagesWithIssues(latest);
+    cards.push(
+      createMetricCard({
+        label: 'Pages with issues',
+        value: formatNumberValue(pagesWithIssues)
+      })
+    );
+    let healthyPages = coerceNumber(pageCounts.withoutIssues, Number.NaN);
+    if (!Number.isFinite(healthyPages)) {
+      if (Number.isFinite(pagesScanned) && Number.isFinite(pagesWithIssues)) {
+        healthyPages = Math.max(0, pagesScanned - pagesWithIssues);
+      } else {
+        healthyPages = Number.NaN;
+      }
+    }
+    cards.push(
+      createMetricCard({
+        label: 'Healthy pages',
+        value: formatNumberValue(healthyPages)
+      })
+    );
+    return cards;
+  }
+
+  function enhanceSnapshotScoreCard(card, scoreValue) {
+    if (!card) return;
+    const valueEl = card.querySelector('.a11y-scan-insights-card-value');
+    if (!valueEl) return;
+    valueEl.textContent = '';
+    valueEl.appendChild(createScoreValueWithGrade(scoreValue, { size: 'compact' }));
+  }
+
   function retryScanInsightsLoad() {
     resetScanInsightsData();
     renderScanInsightsTabContent(scanInsightsState.activeTab);
@@ -518,6 +682,10 @@
 
   function renderScanInsightsHealthTab(target, data) {
     const runs = data?.completedRuns;
+    const snapshotRow = buildScanInsightsSnapshotCards(data);
+    if (snapshotRow) {
+      target.appendChild(snapshotRow);
+    }
     if (!runs || !runs.length) {
       target.appendChild(buildScanInsightsPreface('health'));
       return;
@@ -535,6 +703,10 @@
 
   // Builds the "Progress & remediation" tab which compares the latest three runs.
   function renderScanInsightsProgressTab(target, data) {
+    const snapshotRow = buildScanInsightsSnapshotCards(data);
+    if (snapshotRow) {
+      target.appendChild(snapshotRow);
+    }
     if (!data?.previous) {
       const msg = document.createElement('p');
       msg.className = 'a11y-scan-insights-placeholder';
@@ -585,6 +757,10 @@
   function renderScanInsightsScoreTrendTab(target, data) {
     const baseRuns = Array.isArray(data?.runs) && data.runs.length ? data.runs : data?.completedRuns || [];
     const sortedRuns = sortRunsByCompletedAtAscending(baseRuns.filter(run => run && isRunCompleted(run)));
+    const snapshotRow = buildScanInsightsSnapshotCards(data);
+    if (snapshotRow) {
+      target.appendChild(snapshotRow);
+    }
     if (!sortedRuns.length) {
       target.appendChild(buildScanInsightsPreface('scoreTrend'));
       return;
@@ -611,6 +787,7 @@
         label: 'Accessibility score',
         current: getScorePercent(newestRun),
         previous: getScorePercent(oldestRun),
+        scoreValue: getScorePercent(newestRun),
         valueFormatter: value => Number.isFinite(value) ? `${value.toFixed(1)}%` : '—',
         changeFormatter: delta => `${Math.abs(delta).toFixed(1)}%`,
         preferLower: false
@@ -661,7 +838,14 @@
   const summary = document.createElement('p');
     summary.id = summaryId;
     summary.className = 'a11y-scan-insights-note';
-    summary.textContent = `Tracking ${runs.length} completed runs from ${formatDateOnlyLabel(oldestRun?.completedAt) || '—'} through ${formatDateOnlyLabel(newestRun?.completedAt) || '—'}. Latest ${formatRunLabel(newestRun)} scored ${formatScoreValue(getScorePercent(newestRun))}.`;
+  const oldestLabel = formatDateOnlyLabel(oldestRun?.completedAt) || '—';
+  const newestLabel = formatDateOnlyLabel(newestRun?.completedAt) || '—';
+  const newestScore = getScorePercent(newestRun);
+  const newestScoreText = formatScoreValue(newestScore);
+  summary.textContent = '';
+  summary.append(`Tracking ${runs.length} completed runs from ${oldestLabel} through ${newestLabel}. Latest ${formatRunLabel(newestRun)} scored `);
+  summary.appendChild(createScoreValueWithGrade(newestScore, { fallback: newestScoreText, size: 'compact', formattedText: newestScoreText }));
+  summary.append('.');
     section.appendChild(summary);
     const highlightRunNumber = newestRun?.runNumber ?? null;
     const points = runs
@@ -672,7 +856,6 @@
         isCurrent: highlightRunNumber != null && run?.runNumber === highlightRunNumber
       }))
       .filter(point => Number.isFinite(point.value));
-    const newestScore = getScorePercent(newestRun);
     const oldestScore = getScorePercent(oldestRun);
     const haveScores = Number.isFinite(newestScore) && Number.isFinite(oldestScore);
     const color = haveScores
@@ -717,16 +900,42 @@
   function buildScoreTrendTableSection(runs, newestRun) {
     const captionText = `Completed runs ordered from oldest to newest showing score, issue, and page metrics (${runs.length} total).`;
     const table = buildRunTable(runs, [
-      { header: 'Run', getValue: run => formatRunLabel(run), isRowHeader: true },
-      { header: 'Completed', getValue: run => formatDateTimeLabel(run?.completedAt) || '—' },
-      { header: 'Score', getValue: run => formatScoreValue(getScorePercent(run)) },
-      { header: 'Total issues', getValue: run => formatNumberValue(run?.totalIssues) },
+      {
+        header: 'Run',
+        getValue: run => formatRunLabel(run),
+        getSortValue: run => run?.runNumber ?? null,
+        isRowHeader: true
+      },
+      {
+        header: 'Completed',
+        getValue: run => formatDateTimeLabel(run?.completedAt) || '—',
+        getSortValue: run => (run?.completedAt instanceof Date ? run.completedAt.getTime() : null)
+      },
+      {
+        header: 'Score',
+        getValue: run => createScoreValueWithGrade(getScorePercent(run)),
+        getSortValue: run => getScorePercent(run)
+      },
+      {
+        header: 'Total issues',
+        getValue: run => formatNumberValue(run?.totalIssues),
+        getSortValue: run => coerceNumber(run?.totalIssues, Number.NaN)
+      },
       {
         header: 'Pages scanned',
-        getValue: run => formatNumberValue(getCompletedPageCount(run))
+        getValue: run => formatNumberValue(getCompletedPageCount(run)),
+        getSortValue: run => getCompletedPageCount(run)
       },
-      { header: 'Pages with issues', getValue: run => formatNumberValue(calculatePagesWithIssues(run)) },
-      { header: 'Pages with critical issues', getValue: run => formatNumberValue(coerceNumber(run?.pageCounts?.critical, Number.NaN)) }
+      {
+        header: 'Pages with issues',
+        getValue: run => formatNumberValue(calculatePagesWithIssues(run)),
+        getSortValue: run => calculatePagesWithIssues(run)
+      },
+      {
+        header: 'Pages with critical issues',
+        getValue: run => formatNumberValue(coerceNumber(run?.pageCounts?.critical, Number.NaN)),
+        getSortValue: run => coerceNumber(run?.pageCounts?.critical, Number.NaN)
+      }
     ], {
       caption: captionText,
       highlightRunNumber: newestRun?.runNumber ?? null
@@ -763,12 +972,194 @@
     return note;
   }
 
+  const sortableTableRegistry = new WeakSet();
+
+  function makeTableSortable(table) {
+    if (!table || sortableTableRegistry.has(table)) return;
+    const thead = table.querySelector('thead');
+    const tbody = table.querySelector('tbody');
+    if (!thead || !tbody) return;
+    const headCells = Array.from(thead.querySelectorAll('th'));
+    if (!headCells.length) return;
+    const rows = Array.from(tbody.rows);
+    if (!rows.length) return;
+    rows.forEach((row, index) => {
+      row.dataset.sortIndex = String(index);
+    });
+    sortableTableRegistry.add(table);
+    let sortState = { column: null, direction: 'none' };
+    let liveRegion = null;
+    const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (cb => setTimeout(cb, 16));
+    const ensureLiveRegion = () => {
+      if (liveRegion?.isConnected) return liveRegion;
+      if (!table.parentNode) {
+        raf(ensureLiveRegion);
+        return null;
+      }
+      liveRegion = document.createElement('div');
+      liveRegion.className = 'Offscreen a11y-sort-status';
+      liveRegion.setAttribute('role','status');
+      liveRegion.setAttribute('aria-live','polite');
+      liveRegion.textContent = '';
+      table.parentNode.insertBefore(liveRegion, table);
+      return liveRegion;
+    };
+    ensureLiveRegion();
+    headCells.forEach((th, columnIndex) => {
+      if (!th) return;
+      if (th.dataset.sortable === 'false') {
+        th.setAttribute('aria-sort','none');
+        return;
+      }
+      th.setAttribute('scope', th.getAttribute('scope') || 'col');
+      th.setAttribute('aria-sort','none');
+      th.classList.add('a11y-sortable-header');
+      const button = createSortButton(th);
+      if (!button) return;
+      button.addEventListener('click', () => cycleSort(columnIndex, th, button));
+    });
+
+    function cycleSort(columnIndex, headerCell, triggerButton) {
+      let direction = 'ascending';
+      if (sortState.column === columnIndex) {
+        if (sortState.direction === 'ascending') direction = 'descending';
+        else if (sortState.direction === 'descending') direction = 'none';
+      }
+      sortState = {
+        column: direction === 'none' ? null : columnIndex,
+        direction
+      };
+      headCells.forEach((th, idx) => {
+        const aria = idx === sortState.column ? direction : 'none';
+        th.setAttribute('aria-sort', aria);
+        th.classList.toggle('is-sorted', idx === sortState.column && direction !== 'none');
+      });
+      applySort(sortState.column, sortState.direction);
+      const label = (triggerButton?.dataset?.sortLabel || headerCell?.textContent || 'column').trim();
+      const status = ensureLiveRegion();
+      if (status) {
+        const announcement = direction === 'ascending'
+          ? `${label} sorted ascending`
+          : direction === 'descending'
+            ? `${label} sorted descending`
+            : `${label} sort cleared`;
+        status.textContent = announcement;
+      }
+    }
+
+    function applySort(columnIndex, direction) {
+      const rows = Array.from(tbody.rows);
+      if (columnIndex == null || direction === 'none') {
+        rows
+          .sort((a, b) => Number(a.dataset.sortIndex) - Number(b.dataset.sortIndex))
+          .forEach(row => tbody.appendChild(row));
+        return;
+      }
+      const multiplier = direction === 'ascending' ? 1 : -1;
+      rows
+        .sort((a, b) => {
+          const aCell = a.cells[columnIndex];
+          const bCell = b.cells[columnIndex];
+          const aValue = getSortValueFromCell(aCell);
+          const bValue = getSortValueFromCell(bCell);
+          if (aValue === bValue) {
+            return Number(a.dataset.sortIndex) - Number(b.dataset.sortIndex);
+          }
+          const aNum = typeof aValue === 'number' && Number.isFinite(aValue) ? aValue : null;
+          const bNum = typeof bValue === 'number' && Number.isFinite(bValue) ? bValue : null;
+          if (aNum != null || bNum != null) {
+            if (aNum == null) return 1 * multiplier;
+            if (bNum == null) return -1 * multiplier;
+            if (aNum === bNum) {
+              return Number(a.dataset.sortIndex) - Number(b.dataset.sortIndex);
+            }
+            return (aNum - bNum) * multiplier;
+          }
+          const aStr = String(aValue || '').toLowerCase();
+          const bStr = String(bValue || '').toLowerCase();
+          if (aStr === bStr) {
+            return Number(a.dataset.sortIndex) - Number(b.dataset.sortIndex);
+          }
+          return aStr.localeCompare(bStr) * multiplier;
+        })
+        .forEach(row => tbody.appendChild(row));
+    }
+  }
+
+  function createSortButton(th) {
+    if (!th) return null;
+    const existing = th.querySelector('button.a11y-sort-button');
+    if (existing) return existing;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'a11y-sort-button';
+    const labelSpan = document.createElement('span');
+    labelSpan.className = 'a11y-sort-label';
+    const indicator = document.createElement('span');
+    indicator.className = 'a11y-sort-indicator';
+    indicator.setAttribute('aria-hidden','true');
+    const nodes = Array.from(th.childNodes);
+    const fallbackText = (th.textContent || '').trim() || 'Column';
+    if (nodes.length) {
+      nodes.forEach(node => labelSpan.appendChild(node));
+    } else {
+      labelSpan.textContent = fallbackText;
+    }
+    button.dataset.sortLabel = labelSpan.textContent.trim() || fallbackText;
+    button.setAttribute('aria-label', `Sort by ${button.dataset.sortLabel}`);
+    th.textContent = '';
+    button.appendChild(labelSpan);
+    button.appendChild(indicator);
+    th.appendChild(button);
+    return button;
+  }
+
+  function getSortValueFromCell(cell) {
+    if (!cell) return '';
+    if (cell.dataset && 'sortValue' in cell.dataset) {
+      const raw = cell.dataset.sortValue;
+      if (raw === '' || raw == null) return '';
+      const numeric = Number(raw);
+      return Number.isNaN(numeric) ? raw : numeric;
+    }
+    const timeEl = cell.querySelector?.('time');
+    if (timeEl) {
+      const dtAttr = timeEl.getAttribute('datetime');
+      const parsed = dtAttr ? Date.parse(dtAttr) : NaN;
+      if (!Number.isNaN(parsed)) return parsed;
+    }
+    const text = (cell.textContent || '').trim();
+    const numericCandidate = extractNumericSortCandidate(text);
+    if (numericCandidate != null) return numericCandidate;
+    const dateCandidate = extractDateSortCandidate(text);
+    if (dateCandidate != null) return dateCandidate;
+    return text.toLowerCase();
+  }
+
+  function extractNumericSortCandidate(text) {
+    if (!text) return null;
+    const normalized = text.replace(/[,\s]+/g, '');
+    const match = normalized.match(/-?\d+(?:\.\d+)?/);
+    if (!match) return null;
+    const value = Number(match[0]);
+    return Number.isNaN(value) ? null : value;
+  }
+
+  function extractDateSortCandidate(text) {
+    if (!text) return null;
+    const hasMonth = /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.test(text);
+    if (!hasMonth && !text.includes(':')) return null;
+    const parsed = Date.parse(text);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+
   // Adds CSV download affordances to any tables found within a rendered insights section.
   function attachDownloadControls(section, sectionTitle = '') {
     if (!section) return;
     const resolvedTitle = sectionTitle || section.querySelector('h3')?.textContent || 'scan insights';
     const tables = section.querySelectorAll('table');
     tables.forEach((table, index) => {
+      makeTableSortable(table);
       const filename = buildDownloadFilename(`${resolvedTitle} table ${index + 1}`, 'csv');
       ensureTableDownloadWrapper(table, filename, { sectionTitle: resolvedTitle, tableIndex: index });
     });
@@ -827,37 +1218,19 @@
   // Serializes any metrics table into a CSV blob while preserving the scan label context.
   function downloadTableAsCsv(table, filename = 'table.csv') {
     if (!table) return;
-    const rows = Array.from(table.rows || []);
+    const { rows, columnLinkFlags, columnGradeFlags } = buildTableExportData(table);
     if (!rows.length) return;
     const scanLabel = getScanExportLabel();
     const csvLines = rows.map(row => {
-      const isHeaderRow = row.closest('thead') != null;
-      const prefix = isHeaderRow ? 'Scan' : scanLabel;
-      const isCurrentRunRow = !isHeaderRow && row.getAttribute('data-current-run') === 'true';
-      const cells = Array.from(row.cells || []);
-      const values = [
-        prefix,
-        ...cells.map((cell, cellIndex) => {
-          const badge = cell.querySelector('.a11y-scan-insights-current-label');
-          let text = cell.textContent == null ? '' : cell.textContent.trim();
-          if (badge) {
-            const badgeText = badge.textContent?.trim();
-            if (badgeText) {
-              text = text.replace(badgeText, '').trim();
-            }
-          }
-          if (isCurrentRunRow && cellIndex === 0) {
-            text = text ? `${text} (current run)` : '(current run)';
-          }
-          return text;
-        })
-      ];
-      return values
-        .map(text => {
-          const safe = (text || '').replace(/"/g, '""');
-          return `"${safe}"`;
-        })
-        .join(',');
+      const prefix = row.isHeaderRow ? 'Scan' : scanLabel;
+      const flattened = flattenTableExportRow(row, columnLinkFlags, columnGradeFlags);
+      const values = flattened.slice();
+      const isCurrentRunRow = !row.isHeaderRow && row.element?.getAttribute('data-current-run') === 'true';
+      if (isCurrentRunRow && values.length) {
+        values[0] = values[0] ? `${values[0]} (current run)` : '(current run)';
+      }
+      const prefixed = [prefix, ...values];
+      return prefixed.map(text => escapeCsvValue(text)).join(',');
     });
     const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' });
     triggerFileDownload(blob, filename);
@@ -1179,8 +1552,15 @@
       return 'Not enough data to compare yet.';
     }
     const delta = current - previous;
+    const formattedPrevious = formatValue(previous);
     if (delta === 0) {
-      return `No change • previously ${formatValue(previous)}`;
+      return {
+        text: `No change • previously ${formattedPrevious}`,
+        leadingText: 'No change • previously ',
+        trailingText: '',
+        previousValue: previous,
+        formattedPrevious
+      };
     }
     const improved = preferLower ? delta < 0 : delta > 0;
     const direction = improved ? 'better' : 'worse';
@@ -1192,7 +1572,14 @@
     } else {
       changeText = formatNumberValue(Math.abs(delta));
     }
-    return `${changeText} ${direction} • previously ${formatValue(previous)}`;
+    const leadingText = `${changeText} ${direction} • previously `;
+    return {
+      text: `${leadingText}${formattedPrevious}`,
+      leadingText,
+      trailingText: '',
+      previousValue: previous,
+      formattedPrevious
+    };
   }
 
   // Tiny helper to avoid ID collisions when duplicating sections dynamically.
@@ -1214,18 +1601,52 @@
       }
     );
     const table = buildRunTable(chronologicalRuns, [
-      { header: 'Run', getValue: run => formatRunLabel(run), isRowHeader: true },
-      { header: 'Critical', getValue: run => formatNumberValue(run?.issueCounts?.critical) },
-      { header: 'Serious', getValue: run => formatNumberValue(run?.issueCounts?.serious) },
-      { header: 'Moderate', getValue: run => formatNumberValue(run?.issueCounts?.moderate) },
-      { header: 'Minor', getValue: run => formatNumberValue(run?.issueCounts?.minor) },
-      { header: 'Total', getValue: run => formatNumberValue(run?.totalIssues) },
-      { header: 'High-impact %', getValue: run => {
-        const high = calculateHighImpactCount(run);
-        const total = Number(run?.totalIssues) || 0;
-        if (!total) return '—';
-        return formatPercent(high / total, 1);
-      }}
+      {
+        header: 'Run',
+        getValue: run => formatRunLabel(run),
+        getSortValue: run => run?.runNumber ?? null,
+        isRowHeader: true
+      },
+      {
+        header: 'Critical',
+        getValue: run => formatNumberValue(run?.issueCounts?.critical),
+        getSortValue: run => coerceNumber(run?.issueCounts?.critical, Number.NaN)
+      },
+      {
+        header: 'Serious',
+        getValue: run => formatNumberValue(run?.issueCounts?.serious),
+        getSortValue: run => coerceNumber(run?.issueCounts?.serious, Number.NaN)
+      },
+      {
+        header: 'Moderate',
+        getValue: run => formatNumberValue(run?.issueCounts?.moderate),
+        getSortValue: run => coerceNumber(run?.issueCounts?.moderate, Number.NaN)
+      },
+      {
+        header: 'Minor',
+        getValue: run => formatNumberValue(run?.issueCounts?.minor),
+        getSortValue: run => coerceNumber(run?.issueCounts?.minor, Number.NaN)
+      },
+      {
+        header: 'Total',
+        getValue: run => formatNumberValue(run?.totalIssues),
+        getSortValue: run => coerceNumber(run?.totalIssues, Number.NaN)
+      },
+      {
+        header: 'High-impact %',
+        getValue: run => {
+          const high = calculateHighImpactCount(run);
+          const total = Number(run?.totalIssues) || 0;
+          if (!total) return '—';
+          return formatPercent(high / total, 1);
+        },
+        getSortValue: run => {
+          const high = calculateHighImpactCount(run);
+          const total = Number(run?.totalIssues) || 0;
+          if (!total) return null;
+          return high / total;
+        }
+      }
     ], {
       caption: 'Issue counts per impact level for recent runs, oldest to newest order. Current run is labeled.',
       highlightRunNumber: currentRunNumber
@@ -1312,13 +1733,30 @@
     explanation.appendChild(scoreLine);
     explanation.appendChild(densityLine);
     const table = buildRunTable(chronologicalRuns, [
-      { header: 'Run', getValue: run => formatRunLabel(run), isRowHeader: true },
-  { header: 'Pages scanned', getValue: run => formatNumberValue(getCompletedPageCount(run)) },
-      { header: 'Weighted score', getValue: run => formatNumberValue(calculateWeightedScore(run)) },
-      { header: 'Weighted density', getValue: run => {
-        const density = calculateWeightedDensity(run);
-        return Number.isFinite(density) ? formatPercent(density, 1) : '—';
-      }}
+      {
+        header: 'Run',
+        getValue: run => formatRunLabel(run),
+        getSortValue: run => run?.runNumber ?? null,
+        isRowHeader: true
+      },
+      {
+        header: 'Pages scanned',
+        getValue: run => formatNumberValue(getCompletedPageCount(run)),
+        getSortValue: run => getCompletedPageCount(run)
+      },
+      {
+        header: 'Weighted score',
+        getValue: run => formatNumberValue(calculateWeightedScore(run)),
+        getSortValue: run => calculateWeightedScore(run)
+      },
+      {
+        header: 'Weighted density',
+        getValue: run => {
+          const density = calculateWeightedDensity(run);
+          return Number.isFinite(density) ? formatPercent(density, 1) : '—';
+        },
+        getSortValue: run => calculateWeightedDensity(run)
+      }
     ], {
       caption: 'Weighted density metrics per run ordered from oldest to newest.',
       highlightRunNumber: currentRunNumber
@@ -1636,6 +2074,20 @@
         } else {
           cell.textContent = value == null || value === '' ? '—' : value;
         }
+        if (cell.dataset) {
+          let sortValue = null;
+          if (typeof col.getSortValue === 'function') {
+            sortValue = col.getSortValue(run);
+          } else if (value instanceof Node) {
+            const gradeScore = value.dataset?.gradeScore;
+            if (gradeScore != null) sortValue = Number(gradeScore);
+          } else if (typeof value === 'number') {
+            sortValue = value;
+          }
+          if (sortValue != null && !Number.isNaN(sortValue)) {
+            cell.dataset.sortValue = String(sortValue);
+          }
+        }
         if (col.isRowHeader && isCurrent) {
           const badge = document.createElement('span');
           badge.className = 'a11y-scan-insights-current-label';
@@ -1648,6 +2100,7 @@
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
+    makeTableSortable(table);
     return table;
   }
 
@@ -1697,7 +2150,10 @@
 
   // Human-friendly label for run rows/charts.
   function formatRunLabel(run) {
-    return run?.runNumber != null ? `Run #${run.runNumber}` : 'Run —';
+    if (!run) return 'Run —';
+    if (run.aggregateLabel) return run.aggregateLabel;
+    if (run.label) return run.label;
+    return run.runNumber != null ? `Run #${run.runNumber}` : 'Run —';
   }
 
   // Creates the comparison table shown in the Progress tab (latest vs previous runs).
@@ -1929,15 +2385,21 @@
       valueFormatter
     });
     const meta = deriveImpactMeta(current, previous, preferLower);
-  const formattedValue = valueFormatter ? valueFormatter(current) : current;
-  const card = document.createElement('div');
+    const formattedValue = valueFormatter ? valueFormatter(current) : current;
+    const card = document.createElement('div');
     card.className = `a11y-scan-insights-impact-card impact-${meta.impact}`;
     card.setAttribute('aria-label', `${label || 'Metric'} summary`);
     const icon = createImpactArrowIcon(meta.arrow);
     card.appendChild(icon);
     const valueEl = document.createElement('p');
     valueEl.className = 'a11y-scan-insights-impact-value';
-  valueEl.textContent = formattedValue == null || formattedValue === '' ? '—' : formattedValue;
+    const displayText = formattedValue == null || formattedValue === '' ? '—' : formattedValue;
+    if (Number.isFinite(definition?.scoreValue)) {
+      const wrap = createScoreValueWithGrade(definition.scoreValue, { fallback: displayText });
+      valueEl.appendChild(wrap);
+    } else {
+      valueEl.textContent = displayText;
+    }
     card.appendChild(valueEl);
     const labelEl = document.createElement('p');
     labelEl.className = 'a11y-scan-insights-impact-label';
@@ -1948,8 +2410,85 @@
     card.appendChild(divider);
     const trendEl = document.createElement('p');
     trendEl.className = 'a11y-scan-insights-impact-trend';
-    trendEl.textContent = description;
+    if (description && typeof description === 'object' && description.previousValue != null) {
+      const { leadingText = '', trailingText = '', previousValue, formattedPrevious } = description;
+      trendEl.textContent = '';
+      if (leadingText) trendEl.append(leadingText);
+      const wrap = createScoreValueWithGrade(previousValue, {
+        fallback: formattedPrevious || formatScoreValue(previousValue),
+        size: 'compact',
+        formattedText: formattedPrevious
+      });
+      trendEl.appendChild(wrap);
+      if (trailingText) trendEl.append(trailingText);
+    } else if (description && typeof description === 'object' && description.text) {
+      trendEl.textContent = description.text;
+    } else {
+      trendEl.textContent = description || '';
+    }
     card.appendChild(trendEl);
+    return card;
+  }
+
+  // Simpler variant of the impact card that omits arrows/changes for static summaries.
+  function createStaticImpactSummaryCard(definition = {}) {
+    const { label, value, helperText, breakdowns, scoreValue } = definition;
+    const card = document.createElement('div');
+    card.className = 'a11y-scan-insights-impact-card impact-neutral';
+    card.setAttribute('aria-label', `${label || 'Metric'} summary`);
+
+    const valueEl = document.createElement('p');
+    valueEl.className = 'a11y-scan-insights-impact-value';
+    const mainDisplay = value == null || value === '' ? '—' : value;
+    if (Number.isFinite(scoreValue)) {
+      const wrap = createScoreValueWithGrade(scoreValue, { fallback: mainDisplay });
+      valueEl.appendChild(wrap);
+    } else {
+      valueEl.textContent = mainDisplay;
+    }
+    card.appendChild(valueEl);
+
+    const labelEl = document.createElement('p');
+    labelEl.className = 'a11y-scan-insights-impact-label';
+    labelEl.textContent = label ?? 'Metric';
+    card.appendChild(labelEl);
+
+    if (Array.isArray(breakdowns) && breakdowns.length) {
+      const list = document.createElement('ul');
+      list.className = 'a11y-scan-insights-impact-breakdowns';
+      breakdowns.forEach(entry => {
+        if (!entry) return;
+        const item = document.createElement('li');
+        const name = document.createElement('span');
+        name.className = 'breakdown-label';
+        name.textContent = entry.label || '';
+        const val = document.createElement('span');
+        val.className = 'breakdown-value';
+        const displayValue = entry.value == null || entry.value === '' ? '—' : entry.value;
+        if (Number.isFinite(entry.scoreValue)) {
+          const wrap = createScoreValueWithGrade(entry.scoreValue, {
+            fallback: displayValue,
+            size: 'compact',
+            formattedText: entry.value
+          });
+          val.appendChild(wrap);
+        } else {
+          val.textContent = displayValue;
+        }
+        item.appendChild(name);
+        item.appendChild(val);
+        list.appendChild(item);
+      });
+      card.appendChild(list);
+    }
+
+    if (helperText) {
+      const helperEl = document.createElement('p');
+      helperEl.className = 'a11y-scan-insights-impact-trend';
+      helperEl.textContent = helperText;
+      card.appendChild(helperEl);
+    }
+
     return card;
   }
 
@@ -2031,10 +2570,104 @@
   }
 
   // Formats percentages with a single decimal place and %,
-  // gracefully returning the em dash placeholder when needed.
-  function formatScoreValue(value) {
-    if (value == null || Number.isNaN(value)) return '—';
+  // gracefully returning the provided fallback when needed.
+  function formatScoreValue(value, fallback = '—') {
+    if (value == null || Number.isNaN(value)) return fallback;
     return `${Number(value).toFixed(1)}%`;
+  }
+
+  function normalizeScorePercent(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return null;
+    const scaled = numeric >= 0 && numeric <= 1 ? numeric * 100 : numeric;
+    return Math.min(100, Math.max(0, scaled));
+  }
+
+  function getScoreLetterGrade(value) {
+    const percent = normalizeScorePercent(value);
+    if (percent == null) return null;
+    for (const entry of scoreGradeScale) {
+      if (percent >= entry.min) return entry.letter;
+    }
+    return 'F';
+  }
+
+  function getScoreGradeTier(letter) {
+    if (!letter) return null;
+    const tier = letter.charAt(0).toUpperCase();
+    return scoreGradePalette[tier] ? tier : 'F';
+  }
+
+  function coerceScoreValueForGrade(value) {
+    if (value == null || value === '') return null;
+    if (typeof value === 'number') return normalizeScorePercent(value);
+    if (typeof value === 'string') {
+      const numeric = Number(value.replace(/[^0-9.+-]/g, ''));
+      if (Number.isFinite(numeric)) {
+        return normalizeScorePercent(numeric);
+      }
+    }
+    return null;
+  }
+
+  function getExportGradeLetter(value) {
+    const percent = coerceScoreValueForGrade(value);
+    return percent == null ? '' : getScoreLetterGrade(percent);
+  }
+
+  function createScoreGradeChip(value, { size = 'default' } = {}) {
+    const letter = getScoreLetterGrade(value);
+    if (!letter) return null;
+    const tier = (getScoreGradeTier(letter) || 'F').toLowerCase();
+    const chip = document.createElement('span');
+    const sizeClass = size === 'compact' ? ' grade-size-compact' : '';
+    chip.className = `a11y-score-grade-chip grade-tier-${tier}${sizeClass}`;
+    chip.textContent = letter;
+    chip.setAttribute('aria-label', `Grade ${letter}`);
+    chip.dataset.grade = letter;
+    return chip;
+  }
+
+  function createScoreValueWithGrade(value, { fallback = '—', size = 'default', textClass, formattedText } = {}) {
+    const wrap = document.createElement('span');
+    wrap.className = `a11y-score-value-with-grade${size === 'compact' ? ' is-compact' : ''}`;
+    const textSpan = document.createElement('span');
+    textSpan.className = textClass || 'a11y-score-value-text';
+    const displayText = formattedText != null ? formattedText : formatScoreValue(value, fallback);
+    textSpan.textContent = displayText;
+    wrap.appendChild(textSpan);
+    const chip = createScoreGradeChip(value, { size });
+    if (chip) wrap.appendChild(chip);
+    const normalizedScore = normalizeScorePercent(value);
+    const letter = normalizedScore != null ? getScoreLetterGrade(normalizedScore) : null;
+    if (letter) {
+      wrap.dataset.gradeLetter = letter;
+      wrap.dataset.gradeScore = normalizedScore.toFixed(1);
+    }
+    return wrap;
+  }
+
+  function renderScoreValueWithGrade(target, value, fallback = '—', options = {}) {
+    if (!target) return;
+    const normalizedScore = normalizeScorePercent(value);
+    const letter = normalizedScore != null ? getScoreLetterGrade(normalizedScore) : null;
+    if (letter) {
+      target.dataset.gradeLetter = letter;
+      target.dataset.gradeScore = normalizedScore.toFixed(1);
+      target.dataset.gradeSource = 'score';
+    } else {
+      delete target.dataset.gradeLetter;
+      delete target.dataset.gradeScore;
+      delete target.dataset.gradeSource;
+    }
+    target.textContent = '';
+    const wrap = createScoreValueWithGrade(value, { fallback, ...options });
+    target.appendChild(wrap);
+    if (!target.dataset.gradeLetter && wrap.dataset.gradeLetter) {
+      target.dataset.gradeLetter = wrap.dataset.gradeLetter;
+      target.dataset.gradeScore = wrap.dataset.gradeScore || target.dataset.gradeScore;
+      target.dataset.gradeSource = target.dataset.gradeSource || 'score';
+    }
   }
 
   // Converts raw seconds into a friendly duration label (s/m/h), keeping
@@ -2286,6 +2919,19 @@
     }
   }
 
+  function inferScanTypeFromName(name) {
+    if (!name) return null;
+    const withoutId = name.replace(/\(\s*\d+\s*\)\s*$/, '').trim();
+    if (!withoutId) return null;
+    const segments = withoutId.split(' - ').map(part => part.trim()).filter(Boolean);
+    if (!segments.length) return null;
+    const last = segments[segments.length - 1];
+    if (/pdf/i.test(last)) return 'PDF';
+    if (/mobile/i.test(last)) return 'Mobile';
+    if (/desktop/i.test(last)) return 'Desktop';
+    return null;
+  }
+
   // Constructs the tabbed dialog layout (tablist + panels + footer controls)
   // and kicks off the initial data fetch for whichever tab is active.
   function renderScanInsightsDialog(body, footer) {
@@ -2457,10 +3103,14 @@
   function getScanDetailContext(scanIdFromPath) {
     const scanId = coerceNumber(scanIdFromPath, null);
     if (scanId == null) return null;
+    const scanName = getScanBreadcrumbName();
+    const scanType = inferScanTypeFromName(scanName);
     return {
       scanId: String(scanId),
       runNumber: detectActiveRunNumber(),
-      detectedAt: Date.now()
+      detectedAt: Date.now(),
+      scanName: scanName || null,
+      scanType: scanType || null
     };
   }
 
@@ -2779,7 +3429,7 @@
     const startedAt = pickRunTimestamp(run, ['started','startedAt','startTime','createdAt']);
     const completedAt = pickRunTimestamp(run, ['completed','completedAt','endTime','finishedAt','updatedAt']);
     const status = String(run?.status || run?.state || '').trim();
-    const score = getRunScoreValue(run);
+    let score = getRunScoreValue(run);
     const issueCounts = getRunIssueCounts(run);
     const pageCounts = getRunPageCounts(run);
     const totalIssues = issueCounts.critical + issueCounts.serious + issueCounts.moderate + issueCounts.minor;
@@ -2787,6 +3437,18 @@
     const durationSeconds = deriveRunDurationSeconds(startedAt, completedAt);
     const startedLabel = startedAt ? startedAt.toISOString() : null;
     const completedLabel = completedAt ? completedAt.toISOString() : null;
+    if (!Number.isFinite(score)) {
+      if (shouldDefaultRunScoreToPerfect(run, { issueCounts, totalIssues, pageCounts, totalPages })) {
+        score = 100;
+        logScanInsightsDebug('PDF run reported no results; defaulting score to 100%', {
+          runNumber,
+          status,
+          scanType: scanInsightsState.context?.scanType || run?.scanType || run?.raw?.scanType || null
+        });
+      } else {
+        score = null;
+      }
+    }
     return {
       runNumber,
       status,
@@ -2802,6 +3464,72 @@
       durationSeconds,
       raw: run
     };
+  }
+
+  function shouldDefaultRunScoreToPerfect(run, { issueCounts, totalIssues, pageCounts, totalPages }) {
+    if (!runLikelyPdf(run)) return false;
+    if (
+      statusIndicatesNoResults(run?.status) ||
+      statusIndicatesNoResults(run?.state) ||
+      statusIndicatesNoResults(run?.raw?.status) ||
+      statusIndicatesNoResults(run?.raw?.state)
+    ) {
+      return true;
+    }
+    const severityTotal = Number.isFinite(totalIssues) ? totalIssues : sumIssueCounts(issueCounts);
+    if (severityTotal > 0) return false;
+    const pageSignals = [
+      totalPages,
+      pageCounts?.total,
+      pageCounts?.withIssues,
+      pageCounts?.withoutIssues,
+      pageCounts?.critical,
+      pageCounts?.serious,
+      pageCounts?.moderate,
+      pageCounts?.minor,
+      pageCounts?.raw?.total,
+      run?.pages?.total,
+      run?.totalPages,
+      run?.pagesScanned,
+      run?.pageCount
+    ];
+    const hasPageData = pageSignals.some(value => {
+      const num = coerceNumber(value, Number.NaN);
+      return Number.isFinite(num) && num > 0;
+    });
+    return !hasPageData;
+  }
+
+  function runLikelyPdf(run) {
+    const contextType = scanInsightsState.context?.scanType;
+    if (contextType && valueLooksLikePdf(contextType)) return true;
+    const contextName = scanInsightsState.context?.scanName;
+    if (contextName && valueLooksLikePdf(contextName)) return true;
+    const candidates = [
+      run?.scanType,
+      run?.scan?.type,
+      run?.scanName,
+      run?.raw?.scanType,
+      run?.raw?.scan?.type,
+      run?.raw?.scanName
+    ];
+    return candidates.some(valueLooksLikePdf);
+  }
+
+  function valueLooksLikePdf(value) {
+    if (!value) return false;
+    return /pdf/i.test(String(value));
+  }
+
+  function sumIssueCounts(counts) {
+    if (!counts) return 0;
+    return ['critical','serious','moderate','minor'].reduce((total, key) => {
+      const num = coerceNumber(counts[key], Number.NaN);
+      if (Number.isFinite(num)) {
+        return total + Math.max(0, num);
+      }
+      return total;
+    }, 0);
   }
 
   // Shorthand for fetching the current run's page list, applying pagination
@@ -3623,7 +4351,7 @@
 
   const msPerHour = 1000 * 60 * 60;
   const msPerDay = msPerHour * 24;
-  const impactIssueBandOrder = ['0','1-25','26-50','51-100','101-250','251-500','>500'];
+  const impactIssueBandOrder = ['0','1-10','11-25','26-50','51-100','101-250','251-500','>500'];
   const impactPageBandOrder = [
     '0 pages',
     '1 page',
@@ -3650,7 +4378,7 @@
   const pageImpactFilterStorageKey = 'a11y-page-impact-filter';
   const defaultPageImpactSource = 'website';
   const pageImpactSourceOptions = [
-    { key: 'website', label: 'axe Monitor website', shortLabel: 'Latest scan' },
+    { key: 'website', label: 'axe Monitor website', shortLabel: 'Monitor Website' },
     { key: 'api', label: 'axe Monitor API', shortLabel: 'Monitor API' }
   ];
   const pageImpactSourceAllowedKeys = {
@@ -4188,6 +4916,21 @@
       background: #f0f4f8;
       box-shadow: inset 0 0 0 1px rgba(15,23,42,0.08);
       gap: 4px;
+    }
+
+    .a11y-source-toggle-group {
+      display: inline-flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .a11y-source-toggle-label {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #475569;
     }
 
     .a11y-segment-button {
@@ -4793,6 +5536,42 @@
       font-size: 1rem;
       color: #0f172a;
     }
+
+    .a11y-scan-insights-snapshot-row {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      margin: 1rem 0;
+    }
+
+    .a11y-scan-insights-snapshot-group {
+      border: 1px solid rgba(15,23,42,0.08);
+      border-radius: 16px;
+      padding: 1rem 1.25rem;
+      background: #ffffff;
+      box-shadow: 0 8px 20px rgba(15,23,42,0.06);
+      display: flex;
+      flex-direction: column;
+      gap: 0.65rem;
+    }
+
+    .a11y-scan-insights-snapshot-group h3 {
+      margin: 0;
+      font-size: 0.95rem;
+      color: #0f172a;
+    }
+
+    .a11y-scan-insights-snapshot-grid {
+      display: grid;
+      gap: 0.65rem;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      grid-auto-rows: 1fr;
+      align-items: stretch;
+    }
+
+    .a11y-scan-insights-snapshot-grid .a11y-scan-insights-card {
+      height: 100%;
+    }
     .a11y-scan-insights-summary-grid,
     .a11y-scan-insights-metric-grid,
     .a11y-scan-insights-coverage-grid {
@@ -4877,6 +5656,62 @@
       margin: 0.9rem 0 0.6rem;
       border: none;
       border-top: 1px solid rgba(15,23,42,0.12);
+    }
+    .a11y-scan-insights-impact-breakdowns {
+      list-style: none;
+      margin: 0.6rem 0 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+    .a11y-scan-insights-impact-breakdowns li {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      color: #475569;
+    }
+    .a11y-scan-insights-impact-breakdowns .breakdown-label {
+      font-weight: 500;
+    }
+    .a11y-score-value-with-grade {
+      display: inline-flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+    }
+    .a11y-score-value-with-grade.is-compact {
+      gap: 0.25rem;
+    }
+    .a11y-score-value-text {
+      display: inline-flex;
+      align-items: center;
+    }
+    .a11y-score-grade-chip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.1rem 0.55rem;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: #000;
+      border: 1px solid rgba(15,23,42,0.12);
+      line-height: 1.1;
+      text-transform: uppercase;
+    }
+    .a11y-score-grade-chip.grade-size-compact {
+      font-size: 0.7rem;
+      padding: 0.08rem 0.4rem;
+    }
+    .a11y-score-grade-chip.grade-tier-a { background: #6ee17d; }
+    .a11y-score-grade-chip.grade-tier-b { background: #d6ec5f; }
+    .a11y-score-grade-chip.grade-tier-c { background: #fce33a; }
+    .a11y-score-grade-chip.grade-tier-d { background: #f49a26; }
+    .a11y-score-grade-chip.grade-tier-f { background: #d04230; }
+    .a11y-scan-insights-impact-breakdowns .a11y-score-grade-chip {
+      font-size: 0.65rem;
+      padding: 0.05rem 0.35rem;
     }
     .a11y-scan-insights-impact-trend {
       margin: 0;
@@ -5062,6 +5897,54 @@
       font-size: 0.8rem;
       color: #475569;
       padding: 0.35rem 0.75rem 0;
+    }
+    .a11y-sortable-header {
+      padding: 0;
+    }
+    .a11y-sort-button {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      width: 100%;
+      padding: 0.45rem 0.75rem;
+      border: none;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+    .a11y-sort-button:focus-visible {
+      outline: 2px solid #2563eb;
+      outline-offset: 2px;
+      border-radius: 6px;
+    }
+    .a11y-sort-button .a11y-sort-label {
+      flex: 1;
+      min-width: 0;
+    }
+    .a11y-sort-indicator {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.5rem;
+      height: 1.5rem;
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.08);
+      font-size: 0.65rem;
+      color: #475569;
+    }
+    .a11y-sort-indicator::before {
+      content: '↕';
+    }
+    .a11y-sortable-header[aria-sort="ascending"] .a11y-sort-indicator::before {
+      content: '▲';
+    }
+    .a11y-sortable-header[aria-sort="descending"] .a11y-sort-indicator::before {
+      content: '▼';
+    }
+    .a11y-sortable-header.is-sorted {
+      background: rgba(59, 130, 246, 0.15);
     }
     .a11y-scan-insights-table tr.is-current-run {
       background: rgba(59,130,246,0.08);
@@ -5744,6 +6627,11 @@
     .a11y-scan-report-restore:focus-visible {
       outline: 2px solid var(--focus-light);
       outline-offset: 3px;
+    }
+    .a11y-scan-report-restore.has-updates {
+      border-color: #2563eb;
+      box-shadow: 0 10px 25px rgba(37,99,235,0.25);
+      color: #0f172a;
     }
 
     .a11y-scan-link {
@@ -6646,12 +7534,14 @@
 
   // Converts an issue count into the matching histogram band label.
   function getImpactBandIssues(n) {
-    if (n === 0) return '0';
-    if (n <= 25) return '1-25';
-    if (n <= 50) return '26-50';
-    if (n <= 100) return '51-100';
-    if (n <= 250) return '101-250';
-    if (n <= 500) return '251-500';
+    const value = Number.isFinite(n) ? n : 0;
+    if (value <= 0) return '0';
+    if (value <= 10) return '1-10';
+    if (value <= 25) return '11-25';
+    if (value <= 50) return '26-50';
+    if (value <= 100) return '51-100';
+    if (value <= 250) return '101-250';
+    if (value <= 500) return '251-500';
     return '>500';
   }
 
@@ -7653,7 +8543,7 @@
 
     function updateSourceHintText() {
       if (viewLimitedToPages) {
-        sourceHint.textContent = 'Pages with Issues always uses the Latest scan source. Moderate and Minor impacts are unavailable on this tab.';
+        sourceHint.textContent = 'Pages with Issues always uses the Monitor Website source. Moderate and Minor impacts are unavailable on this tab.';
         return;
       }
       if (workingSource === 'api') {
@@ -8072,12 +8962,6 @@
         logImpactApi('Unable to refresh view after API load:', err?.message || err);
       });
     }
-  }
-
-  // Legacy helper for the table ranking view (kept separate from the insights
-  // modal formatter because it allows custom fallbacks).
-  function formatScoreValue(value, fallback = '—') {
-    return Number.isFinite(value) ? `${value.toFixed(1)}%` : fallback;
   }
 
   function extractScanIdFromLabel(label) {
@@ -8574,19 +9458,63 @@
     return {};
   }
 
-  const scoreBucketSpecs = [
-    { label: '100%', min: 100, max: 100 },
-    { label: '95-99%', min: 95, max: 99.999 },
-    { label: '90-94%', min: 90, max: 94.999 },
-    { label: '80-89%', min: 80, max: 89.999 },
-    { label: '70-79%', min: 70, max: 79.999 },
-    { label: '60-69%', min: 60, max: 69.999 },
-    { label: '50-59%', min: 50, max: 59.999 },
-    { label: '40-49%', min: 40, max: 49.999 },
-    { label: '30-39%', min: 30, max: 39.999 },
-    { label: '20-29%', min: 20, max: 29.999 },
-    { label: '<20%', min: null, max: 19.999 }
-  ];
+  const scoreBucketSpecs = createScoreBucketSpecs();
+
+  function createScoreBucketSpecs() {
+    const specs = [
+      { label: '100%', min: 100, max: 100, letter: getScoreLetterGrade(100) || 'A' },
+      { label: '95-99%', min: 95, max: 99.999, letter: getScoreLetterGrade(95) || 'A-' }
+    ];
+    const gradedEntries = scoreGradeScale.filter(entry => entry.min < 95);
+    gradedEntries.forEach((entry, idx) => {
+      const previousMin = idx === 0 ? 95 : gradedEntries[idx - 1].min;
+      const max = (previousMin != null ? previousMin : entry.min) - 0.001;
+      specs.push({
+        label: entry.letter,
+        min: entry.min,
+        max,
+        letter: entry.letter
+      });
+    });
+    const lowestMin = gradedEntries.length ? gradedEntries[gradedEntries.length - 1].min : 65;
+    specs.push({ label: 'F', min: null, max: (lowestMin || 65) - 0.001, letter: 'F' });
+    return specs.map(spec => ({ ...spec, rangeLabel: formatScoreBucketRange(spec) }));
+  }
+
+  function getScoreBucketSpec(label) {
+    return scoreBucketSpecs.find(spec => spec.label === label) || null;
+  }
+
+  function formatScoreBucketRange(spec) {
+    if (!spec) return '';
+    const minBound = Number.isFinite(spec.min) ? Math.ceil(spec.min) : null;
+    const maxBound = Number.isFinite(spec.max) ? Math.floor(spec.max) : null;
+    if (minBound != null && maxBound != null) {
+      if (minBound === maxBound) return `${minBound}%`;
+      return `${minBound}-${maxBound}%`;
+    }
+    if (minBound != null) {
+      return `${minBound}%+`;
+    }
+    if (maxBound != null) {
+      return `<${maxBound + 1}%`;
+    }
+    return '';
+  }
+
+  function createScoreBucketChip(spec) {
+    if (!spec) return null;
+    const letter = spec.letter || getScoreLetterGrade(spec.min ?? spec.max);
+    if (!letter) return null;
+    const range = spec.rangeLabel || formatScoreBucketRange(spec);
+    const tier = (getScoreGradeTier(letter) || 'F').toLowerCase();
+    const chip = document.createElement('span');
+    chip.className = `a11y-score-grade-chip grade-tier-${tier}`;
+    chip.textContent = range ? `${letter} • ${range}` : letter;
+    chip.setAttribute('aria-label', range ? `Grade ${letter} (${range})` : `Grade ${letter}`);
+    chip.dataset.grade = letter;
+    return chip;
+  }
 
   // Creates an empty histogram keyed by the scoreBucketSpecs labels.
   function makeScoreBuckets() {
@@ -8603,7 +9531,7 @@
       const meetsMax = spec.max == null ? true : scoreVal <= spec.max + 1e-9;
       if (meetsMin && meetsMax) return spec.label;
     }
-    return '<20%';
+    return scoreBucketSpecs[scoreBucketSpecs.length - 1]?.label || 'F';
   }
 
   // Basic percentage formatter that guards against divide-by-zero.
@@ -11351,8 +12279,8 @@
       }
       logWidget('refreshMainView start', { preserveState, targetTabKey, currentTabKey });
       const desiredTab = targetTabKey || currentTabKey || 'status';
-      const { body, footer, updateFilterButtonLabel } = modalContext;
-      if (preserveState) {
+      const { body, isDialogMinimized, notifyDeferredRefresh } = modalContext;
+      if (preserveState && body) {
         const activePanel = getActivePanelElement(body);
         const existingState = captureAccordionState(activePanel || body);
         if (existingState) {
@@ -11360,18 +12288,36 @@
         }
       }
       currentTabKey = desiredTab;
-      const restoreState = accordionStateByTab[currentTabKey] || getDefaultAccordionState(currentTabKey);
+      const restoreState = accordionStateByTab[desiredTab] || getDefaultAccordionState(desiredTab);
+      accordionStateByTab[desiredTab] = restoreState;
       const data = await getBuildDataPromise();
-      renderBody(body, data, updateFilterButtonLabel, footer, restoreState, {
-        mode: modalContext?.mode || pageContext
-      });
-      const newPanel = getActivePanelElement(body);
-      accordionStateByTab[currentTabKey] = captureAccordionState(newPanel || body) || {};
+      const minimized = typeof isDialogMinimized === 'function' ? isDialogMinimized() : false;
+      if (minimized) {
+        lastRenderedData = data;
+        notifyDeferredRefresh?.(data, { desiredTabKey: desiredTab, restoreState });
+        logWidget('refreshMainView deferred (minimized)', { tab: desiredTab, rowCount: data?.rows?.length || 0 });
+        return data;
+      }
+      renderModalContentsWithData(data, { desiredTabKey: desiredTab, restoreState });
       logWidget('refreshMainView complete', { tab: currentTabKey, rowCount: data?.rows?.length || 0 });
       return data;
     })();
     refreshMainViewPromise = runner.finally(() => { refreshMainViewPromise = null; });
     return runner;
+  }
+
+  function renderModalContentsWithData(data, { desiredTabKey, restoreState } = {}) {
+    if (!modalContext) return;
+    const { body, footer, updateFilterButtonLabel } = modalContext;
+    if (!body || !footer) return;
+    const targetTab = desiredTabKey || currentTabKey || 'status';
+    currentTabKey = targetTab;
+    const stateToApply = restoreState || accordionStateByTab[targetTab] || getDefaultAccordionState(targetTab);
+    renderBody(body, data, updateFilterButtonLabel, footer, stateToApply, {
+      mode: modalContext?.mode || pageContext
+    });
+    const newPanel = getActivePanelElement(body);
+    accordionStateByTab[targetTab] = captureAccordionState(newPanel || body) || {};
   }
 
   // --- Data builder ---
@@ -11442,16 +12388,18 @@
           domain = dom || 'Other';
         }
       }
+      const isPdfRow = /pdf/i.test(type);
 
       const statusText = (cells[statusIdx]?.textContent || '').trim();
       let statusKey = 'Other';
       if (/complete/i.test(statusText)) statusKey = 'Complete';
       else if (/queued/i.test(statusText)) statusKey = 'Queued';
       else if (/cancel/i.test(statusText)) statusKey = 'Cancelled';
+      const statusNoResults = statusIndicatesNoResults(statusText);
 
-      const scoreText = (cells[scoreIdx]?.textContent || '').trim();
-      const scoreVal = parseFloat(scoreText.replace('%',''));
-      const scoreBucket = getScoreBucketLabel(scoreVal);
+      const rawScoreText = (cells[scoreIdx]?.textContent || '').trim();
+      let scoreText = rawScoreText;
+      let scoreVal = parseFloat(scoreText.replace('%',''));
 
       let lastRun = null;
       if (lastRunIdx !== -1) {
@@ -11485,6 +12433,13 @@
         }
       }
 
+      const hasZeroIssues = Number.isFinite(total) && total === 0;
+      if ((statusNoResults && isPdfRow) || hasZeroIssues) {
+        scoreVal = 100;
+        scoreText = '100%';
+      }
+      const scoreBucket = getScoreBucketLabel(scoreVal);
+
       const rowEntry = {
         name: rawName,
         type,
@@ -11492,6 +12447,7 @@
         statusKey,
         statusText,
         scoreText,
+  noResults: statusNoResults,
         scoreVal,
         scoreBucket,
         lastRun,
@@ -11754,7 +12710,13 @@
       tr.appendChild(nameCell);
 
       const scoreCell = document.createElement('td');
-      scoreCell.textContent = r.scoreText || (Number.isFinite(r.scoreVal) ? `${r.scoreVal}%` : '');
+      const explicitScoreText = r.scoreText && r.scoreText.trim() ? r.scoreText : null;
+      renderScoreValueWithGrade(
+        scoreCell,
+        r.scoreVal,
+        explicitScoreText || '—',
+        explicitScoreText ? { formattedText: explicitScoreText } : undefined
+      );
       tr.appendChild(scoreCell);
 
       if (hasPageColumns) {
@@ -12023,6 +12985,13 @@
       .slice(0, 60) || 'table';
   }
 
+  function stripCellExportArtifacts(node) {
+    if (!node) return '';
+    const clone = node.cloneNode(true);
+    clone.querySelectorAll('.a11y-scan-insights-current-label, .a11y-score-grade-chip').forEach(el => el.remove());
+    return (clone.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
   function getCellCsvText(cell) {
     if (!cell) return '';
     const select = cell.querySelector('select');
@@ -12040,23 +13009,102 @@
       const uncheckedLabel = cell.dataset?.csvUnchecked ?? 'No';
       return checkbox.checked ? checkedLabel : uncheckedLabel;
     }
-    return (cell.textContent || '').replace(/\s+/g, ' ').trim();
+    const anchor = cell.querySelector('a');
+    if (anchor) {
+      const clone = anchor.cloneNode(true);
+      clone.querySelectorAll('.sr-only, .sr-only-text, .Offscreen, .a11y-score-grade-chip').forEach(el => el.remove());
+      const text = clone.textContent || anchor.textContent || '';
+      return text.replace(/\s+/g, ' ').trim();
+    }
+    return stripCellExportArtifacts(cell);
+  }
+
+  function getCellCsvValue(cell) {
+    const text = getCellCsvText(cell);
+    const anchor = cell?.querySelector?.('a[href]');
+    const link = anchor ? anchor.href : null;
+    const grade = getCellGradeValue(cell);
+    return { text, link, grade };
+  }
+
+  function getCellGradeValue(cell) {
+    if (!cell) return '';
+    if (cell.dataset?.gradeLetter) return cell.dataset.gradeLetter;
+    const carrier = cell.querySelector('[data-grade-letter]');
+    if (carrier?.dataset?.gradeLetter) return carrier.dataset.gradeLetter;
+    const chip = cell.querySelector('.a11y-score-grade-chip');
+    if (chip?.dataset?.grade) return chip.dataset.grade;
+    return '';
+  }
+
+  function buildTableExportData(table) {
+    if (!table) return { rows: [], columnLinkFlags: [], columnGradeFlags: [] };
+    const rowElements = Array.from(table.querySelectorAll('tr'));
+    const rows = [];
+    const columnLinkFlags = [];
+    const columnGradeFlags = [];
+    rowElements.forEach(row => {
+      const cells = Array.from(row.querySelectorAll('th,td')).map((cell, idx) => {
+        const value = getCellCsvValue(cell);
+        if (value.link) columnLinkFlags[idx] = true;
+        if (value.grade) columnGradeFlags[idx] = true;
+        return value;
+      });
+      rows.push({
+        cells,
+        isHeaderRow: row.parentElement?.tagName === 'THEAD',
+        element: row
+      });
+    });
+    return { rows, columnLinkFlags, columnGradeFlags };
+  }
+
+  function flattenTableExportRow(row, columnLinkFlags, columnGradeFlags) {
+    const headerSuffix = ' URL';
+    const flattened = [];
+    row.cells.forEach((cell, idx) => {
+      flattened.push(cell.text ?? '');
+      if (columnLinkFlags[idx]) {
+        if (row.isHeaderRow) {
+          const base = cell.text || 'Link';
+          flattened.push(`${base}${headerSuffix}`);
+        } else {
+          flattened.push(cell.link || '');
+        }
+      }
+      if (columnGradeFlags[idx]) {
+        if (row.isHeaderRow) {
+          const base = cell.text || 'Value';
+          flattened.push(`${base} Letter Grade`);
+        } else {
+          flattened.push(cell.grade || '');
+        }
+      }
+    });
+    return flattened;
+  }
+
+  function escapeCsvValue(text) {
+    const safe = text == null ? '' : String(text);
+    const escaped = safe.replace(/"/g, '""');
+    return /[",\n]/.test(safe) ? `"${escaped}"` : escaped;
   }
 
   function tableToCsv(table) {
-    const rows = Array.from(table.querySelectorAll('tr'));
+    const { rows, columnLinkFlags, columnGradeFlags } = buildTableExportData(table);
+    if (!rows.length) return '';
     return rows
-      .map(row => {
-        const cells = Array.from(row.querySelectorAll('th,td'));
-        return cells
-          .map(cell => {
-            const text = getCellCsvText(cell);
-            const escaped = text.replace(/"/g, '""');
-            return /[",\n]/.test(text) ? `"${escaped}"` : escaped;
-          })
-          .join(',');
-      })
+      .map(row => flattenTableExportRow(row, columnLinkFlags, columnGradeFlags)
+        .map(text => escapeCsvValue(text))
+        .join(','))
       .join('\n');
+  }
+
+  function tableToAoA(table) {
+    if (!table) return [];
+    const { rows, columnLinkFlags, columnGradeFlags } = buildTableExportData(table);
+    if (!rows.length) return [];
+    return rows.map(row => flattenTableExportRow(row, columnLinkFlags, columnGradeFlags));
   }
 
   function downloadCsv(content, filename) {
@@ -12073,16 +13121,51 @@
 
   function objectsToCsv(rows, columns) {
     if (!rows?.length || !columns?.length) return '';
-    const header = columns.map(col => col.label).join(',');
+    const headerParts = [];
+    columns.forEach(col => {
+      headerParts.push(col.label);
+      if (col.withGrade) headerParts.push(`${col.label} Letter Grade`);
+    });
+    const header = headerParts.join(',');
     const body = rows
-      .map(row => columns.map(col => {
-        const value = col.format ? col.format(row[col.key], row) : row[col.key];
-        const text = value == null ? '' : String(value);
-        const escaped = text.replace(/"/g,'""');
-        return /[",\n]/.test(text) ? `"${escaped}"` : escaped;
-      }).join(','))
+      .map(row => {
+        const values = [];
+        columns.forEach(col => {
+          const rawValue = typeof col.get === 'function' ? col.get(row) : col.key != null ? row[col.key] : undefined;
+          const formatted = col.format ? col.format(rawValue, row) : rawValue;
+          values.push(escapeCsvValue(formatted == null ? '' : String(formatted)));
+          if (col.withGrade) {
+            const gradeSource = typeof col.gradeAccessor === 'function' ? col.gradeAccessor(row) : rawValue;
+            values.push(escapeCsvValue(getExportGradeLetter(gradeSource)));
+          }
+        });
+        return values.join(',');
+      })
       .join('\n');
     return [header, body].filter(Boolean).join('\n');
+  }
+
+  function objectsToAoA(rows, columns) {
+    if (!rows?.length || !columns?.length) return [];
+    const header = [];
+    columns.forEach(col => {
+      header.push(col.label);
+      if (col.withGrade) header.push(`${col.label} Letter Grade`);
+    });
+    const body = rows.map(row => {
+      const values = [];
+      columns.forEach(col => {
+        const rawValue = typeof col.get === 'function' ? col.get(row) : col.key != null ? row[col.key] : undefined;
+        const formatted = col.format ? col.format(rawValue, row) : rawValue;
+        values.push(formatted == null ? '' : String(formatted));
+        if (col.withGrade) {
+          const gradeSource = typeof col.gradeAccessor === 'function' ? col.gradeAccessor(row) : rawValue;
+          values.push(getExportGradeLetter(gradeSource));
+        }
+      });
+      return values;
+    });
+    return [header, ...body];
   }
 
   function downloadObjectCsv(rows, columns, filenameBase) {
@@ -12093,6 +13176,92 @@
     const csv = objectsToCsv(rows, columns);
     const filename = `${sanitizeFilename(filenameBase || 'data')}-${new Date().toISOString().slice(0,10)}.csv`;
     downloadCsv(csv, filename);
+  }
+
+  const sheetJsCdnUrl = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+  let sheetJsPromise = null;
+
+  function ensureSheetJsLoaded() {
+    if (typeof window !== 'undefined' && window.XLSX) {
+      return Promise.resolve(window.XLSX);
+    }
+    if (sheetJsPromise) return sheetJsPromise;
+    sheetJsPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = sheetJsCdnUrl;
+      script.async = true;
+      script.onload = () => {
+        if (window.XLSX) {
+          resolve(window.XLSX);
+        } else {
+          reject(new Error('SheetJS failed to load.'));
+        }
+      };
+      script.onerror = () => reject(new Error('Unable to load SheetJS.'));
+      document.head.appendChild(script);
+    }).catch(err => {
+      sheetJsPromise = null;
+      throw err;
+    });
+    return sheetJsPromise;
+  }
+
+  function sanitizeWorksheetName(name) {
+    const unsafePattern = /[\\/*?:\[\]]/g;
+    const cleaned = (name || 'Sheet').replace(unsafePattern, ' ').replace(/\s+/g, ' ').trim();
+    return (cleaned || 'Sheet').slice(0, 31);
+  }
+
+  function buildExcelSheetName(accordionTitle, moreInfo, usedNames) {
+    const parts = [accordionTitle, moreInfo].map(part => (part || '').trim()).filter(Boolean);
+    const base = sanitizeWorksheetName(parts.join(' - ') || 'Sheet');
+    if (!usedNames.has(base)) {
+      usedNames.set(base, 1);
+      return base;
+    }
+    let index = usedNames.get(base) + 1;
+    let candidate = base;
+    while (usedNames.has(candidate)) {
+      const suffix = ` (${index})`;
+      const trimmed = base.slice(0, Math.max(0, 31 - suffix.length));
+      candidate = sanitizeWorksheetName(`${trimmed}${suffix}`);
+      index += 1;
+    }
+    usedNames.set(base, index - 1);
+    usedNames.set(candidate, 1);
+    return candidate;
+  }
+
+  async function exportExcelWorkbook(entries, { filenameBase = 'score-tab-data' } = {}) {
+    if (!Array.isArray(entries) || !entries.length) {
+      throw new Error('No data available to export.');
+    }
+    const XLSX = await ensureSheetJsLoaded();
+    const workbook = XLSX.utils.book_new();
+    const usedNames = new Map();
+    let sheetCount = 0;
+
+    for (const entry of entries) {
+      if (!entry || typeof entry.getSheetData !== 'function') continue;
+      try {
+        const result = await entry.getSheetData();
+        const rows = Array.isArray(result) ? result : result?.rows;
+        if (!Array.isArray(rows) || !rows.length) continue;
+        const sheetName = buildExcelSheetName(entry.accordionTitle, entry.moreInfo, usedNames);
+        const worksheet = XLSX.utils.aoa_to_sheet(rows);
+        XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+        sheetCount += 1;
+      } catch (err) {
+        console.error('Unable to prepare Excel sheet', err);
+      }
+    }
+
+    if (!sheetCount) {
+      throw new Error('No valid worksheet data found.');
+    }
+
+    const filename = `${sanitizeFilename(filenameBase)}-${new Date().toISOString().slice(0,10)}.xlsx`;
+    XLSX.writeFile(workbook, filename);
   }
 
   async function writeTextToClipboard(text) {
@@ -12120,6 +13289,7 @@
 
   function appendTableWithDownload(target, table, { filenameBase, buttonLabel } = {}) {
     if (!table || !target) return table;
+    makeTableSortable(table);
     if (table.dataset.downloadReady === 'true') {
       target.appendChild(table.parentElement || table);
       return table;
@@ -12151,6 +13321,69 @@
     return table;
   }
 
+  const bandDownloadDetailColumns = [
+    { key: 'band', label: 'Band' },
+    { key: 'group', label: 'Group' },
+    { key: 'name', label: 'Scan Name' },
+    { key: 'type', label: 'Type' },
+    { key: 'domain', label: 'Domain' },
+    { key: 'status', label: 'Status' },
+    { key: 'score', label: 'Score', withGrade: true },
+    { key: 'critical', label: 'Critical' },
+    { key: 'serious', label: 'Serious' },
+    { key: 'moderate', label: 'Moderate' },
+    { key: 'minor', label: 'Minor' },
+    { key: 'total', label: 'Total Issues' },
+    { key: 'pages', label: 'Pages' },
+    { key: 'lastRun', label: 'Last Run' },
+    { key: 'url', label: 'URL' }
+  ];
+
+  async function buildBandDownloadDataset({
+    metricsType = 'issues',
+    bandOrder = [],
+    rowFilter,
+    groupLabel = ''
+  } = {}) {
+    if (!Array.isArray(bandOrder) || !bandOrder.length || typeof rowFilter !== 'function') {
+      return [];
+    }
+    const data = await refreshMainView({ preserveState: true });
+    const usePageMetrics = metricsType === 'pages';
+    const sourceRows = usePageMetrics
+      ? (data.pagesSummary?.filtered || [])
+      : (data.filtered || []);
+    const allBandScans = [];
+    bandOrder.forEach(bandItem => {
+      const bandScans = sourceRows.filter(r => rowFilter(r, bandItem));
+      bandScans.forEach(scan => {
+        const bandLabel = typeof bandItem === 'string' ? bandItem : bandItem.band;
+        const groupLabelValue = typeof bandItem === 'string'
+          ? (groupLabel || '')
+          : (bandItem.type || groupLabel || '');
+        const metricsCounts = usePageMetrics ? getPageImpactCounts(scan) : getIssueImpactCounts(scan);
+        allBandScans.push({
+          band: bandLabel,
+          group: groupLabelValue,
+          name: scan.name || '',
+          type: scan.type || '',
+          domain: scan.domain || '',
+          status: scan.statusText || '',
+          score: scan.scoreVal != null ? scan.scoreVal : '',
+          critical: metricsCounts.critical != null ? metricsCounts.critical : '',
+          serious: metricsCounts.serious != null ? metricsCounts.serious : '',
+          moderate: metricsCounts.moderate != null ? metricsCounts.moderate : '',
+          minor: metricsCounts.minor != null ? metricsCounts.minor : '',
+          total: scan.total != null ? scan.total : '',
+          pages: scan.pages != null ? scan.pages : '',
+          lastRun: scan.lastRun ? scan.lastRun.toISOString() : '',
+          url: scan.url || ''
+        });
+      });
+    });
+    return allBandScans;
+  }
+
   function appendBandDownloadButton(target, rows, { filenameBase, label, columns, bandOrder, rowFilter, groupLabel, metricsType = 'issues' } = {}) {
     if (!target || !Array.isArray(rows) || !rows.length) return;
     const toolbar = document.createElement('div');
@@ -12163,61 +13396,8 @@
       try {
         // If bandOrder and rowFilter are provided, export detailed scan data
         if (bandOrder && typeof rowFilter === 'function') {
-          const data = await refreshMainView({ preserveState: true });
-          const usePageMetrics = metricsType === 'pages';
-          const sourceRows = usePageMetrics
-            ? (data.pagesSummary?.filtered || [])
-            : (data.filtered || []);
-          const allBandScans = [];
-          
-          // Collect all scans from each band
-          // bandOrder can be either an array of band labels or array of {type, band} objects
-          bandOrder.forEach(bandItem => {
-            const bandScans = sourceRows.filter(r => rowFilter(r, bandItem));
-            bandScans.forEach(scan => {
-              const bandLabel = typeof bandItem === 'string' ? bandItem : bandItem.band;
-              const groupLabelValue = typeof bandItem === 'string' ? 
-                (groupLabel || '') : 
-                (bandItem.type || groupLabel || '');
-              const metricsCounts = usePageMetrics ? getPageImpactCounts(scan) : getIssueImpactCounts(scan);
-              
-              allBandScans.push({
-                band: bandLabel,
-                group: groupLabelValue,
-                name: scan.name || '',
-                type: scan.type || '',
-                domain: scan.domain || '',
-                status: scan.statusText || '',
-                score: scan.scoreVal != null ? scan.scoreVal : '',
-                critical: metricsCounts.critical != null ? metricsCounts.critical : '',
-                serious: metricsCounts.serious != null ? metricsCounts.serious : '',
-                moderate: metricsCounts.moderate != null ? metricsCounts.moderate : '',
-                minor: metricsCounts.minor != null ? metricsCounts.minor : '',
-                total: scan.total != null ? scan.total : '',
-                pages: scan.pages != null ? scan.pages : '',
-                lastRun: scan.lastRun ? scan.lastRun.toISOString() : '',
-                url: scan.url || ''
-              });
-            });
-          });
-          
-          downloadObjectCsv(allBandScans, [
-            { key: 'band', label: 'Band' },
-            { key: 'group', label: 'Group' },
-            { key: 'name', label: 'Scan Name' },
-            { key: 'type', label: 'Type' },
-            { key: 'domain', label: 'Domain' },
-            { key: 'status', label: 'Status' },
-            { key: 'score', label: 'Score' },
-            { key: 'critical', label: 'Critical' },
-            { key: 'serious', label: 'Serious' },
-            { key: 'moderate', label: 'Moderate' },
-            { key: 'minor', label: 'Minor' },
-            { key: 'total', label: 'Total Issues' },
-            { key: 'pages', label: 'Pages' },
-            { key: 'lastRun', label: 'Last Run' },
-            { key: 'url', label: 'URL' }
-          ], filenameBase || 'band-data-detailed');
+          const allBandScans = await buildBandDownloadDataset({ metricsType, bandOrder, rowFilter, groupLabel });
+          downloadObjectCsv(allBandScans, bandDownloadDetailColumns, filenameBase || 'band-data-detailed');
         } else {
           // Fallback to summary data
           downloadObjectCsv(rows, columns || [
@@ -12272,7 +13452,13 @@
 
       const bandHeader = document.createElement('th');
       bandHeader.setAttribute('scope','row');
-      bandHeader.textContent = band;
+      const bandSpec = getScoreBucketSpec(typeof band === 'string' ? band : band?.band);
+      const bandChip = bandSpec ? createScoreBucketChip(bandSpec) : null;
+      if (bandChip) {
+        bandHeader.appendChild(bandChip);
+      } else {
+        bandHeader.textContent = typeof band === 'string' ? band : band?.band || '';
+      }
       tr.appendChild(bandHeader);
 
       const tdScans = document.createElement('td');
@@ -12315,6 +13501,13 @@
 
     table.appendChild(tbody);
     appendTableWithDownload(details, table, { filenameBase: options.filenameBase || contextPrefix || 'score-table' });
+    if (typeof options.onTableReady === 'function') {
+      try {
+        options.onTableReady(table);
+      } catch (err) {
+        console.error('Unable to register score table for export', err);
+      }
+    }
 
     const p = document.createElement('p');
     p.style.fontSize = '11px';
@@ -12609,7 +13802,7 @@
       lastRenderedData = null;
     }
 
-    const scoreBandOrder = bucketLabels;
+  const scoreBandOrder = bucketLabels;
     const nowMs = now.getTime();
     const domainHierarchy = buildDomainHierarchy(domainOptions);
     const domainAggregates = aggregateDomains(filtered);
@@ -12627,6 +13820,98 @@
       pageRowsByType[row.type].push(row);
     });
     const pageDomainAggregates = pageDataAvailable ? aggregatePageDomains(pageRowsQualified) : new Map();
+    const completeRows = filtered.filter(row => row.statusKey === 'Complete');
+    const completePageRows = pageFilteredSource.filter(row => row.statusKey === 'Complete');
+
+    const getRowTotalIssuesFromTable = row => {
+      if (!row || row.statusKey !== 'Complete') return 0;
+      const totalValue = coerceNumber(row.total, Number.NaN);
+      if (Number.isFinite(totalValue)) return Math.max(0, totalValue);
+      const fields = ['crit','serious','moderate','minor'];
+      return fields.reduce((sum, key) => {
+        const value = coerceNumber(row[key], Number.NaN);
+        if (!Number.isFinite(value)) return sum;
+        return sum + Math.max(0, value);
+      }, 0);
+    };
+
+    const scoreSnapshotMetrics = (() => {
+      const metrics = {
+        averageScore: null,
+        totalIssues: null,
+        criticalIssues: null,
+        seriousIssues: null,
+        pagesWithIssues: null,
+        criticalPages: null,
+        seriousPages: null,
+        scanCount: filtered.length,
+        scanCountsByType: {},
+        averageScoreByType: {}
+      };
+
+      if (filtered.length) {
+        const countsByType = {};
+        filtered.forEach(row => {
+          const key = row?.type || 'Other';
+          countsByType[key] = (countsByType[key] || 0) + 1;
+        });
+        metrics.scanCountsByType = countsByType;
+      }
+
+      if (completeRows.length) {
+        let scoreSum = 0;
+        let scoreCount = 0;
+        let issueTotal = 0;
+        let criticalIssues = 0;
+        let seriousIssues = 0;
+        const scoreSumsByType = new Map();
+        const scoreCountsByType = new Map();
+        completeRows.forEach(row => {
+          if (Number.isFinite(row.scoreVal)) {
+            scoreSum += row.scoreVal;
+            scoreCount += 1;
+            const typeKey = row?.type || 'Other';
+            scoreSumsByType.set(typeKey, (scoreSumsByType.get(typeKey) || 0) + row.scoreVal);
+            scoreCountsByType.set(typeKey, (scoreCountsByType.get(typeKey) || 0) + 1);
+          }
+          issueTotal += getRowTotalIssuesFromTable(row);
+          criticalIssues += getRowCritical(row);
+          seriousIssues += getRowSerious(row);
+        });
+        metrics.averageScore = scoreCount ? (scoreSum / scoreCount) : null;
+        metrics.totalIssues = issueTotal;
+        metrics.criticalIssues = criticalIssues;
+        metrics.seriousIssues = seriousIssues;
+        const averagesByType = {};
+        scoreSumsByType.forEach((sum, typeKey) => {
+          const count = scoreCountsByType.get(typeKey) || 0;
+          if (!count) return;
+          averagesByType[typeKey] = sum / count;
+        });
+        metrics.averageScoreByType = averagesByType;
+      }
+
+      if (completePageRows.length) {
+        let pagesWithIssues = 0;
+        let criticalPages = 0;
+        let seriousPages = 0;
+        completePageRows.forEach(row => {
+          const counts = getWebsitePageImpactCounts(row);
+          criticalPages += counts.critical || 0;
+          seriousPages += counts.serious || 0;
+          const totalValue = coerceNumber(row.pages, Number.NaN);
+          if (Number.isFinite(totalValue)) {
+            pagesWithIssues += Math.max(0, totalValue);
+          } else {
+            pagesWithIssues += counts.critical + counts.serious + counts.moderate + counts.minor;
+          }
+        });
+        metrics.pagesWithIssues = pagesWithIssues;
+        metrics.criticalPages = criticalPages;
+        metrics.seriousPages = seriousPages;
+      }
+      return metrics;
+    })();
   const activeImpactKeys = getActivePageImpactKeys();
   const activeImpactSet = new Set(activeImpactKeys);
   const impactFilterLabel = formatPageImpactSelection(activeImpactKeys);
@@ -12750,6 +14035,56 @@
       quick: []
     };
 
+    const tabExcelRegistry = new Map();
+    const registerTabExcelEntry = (tabKey, entry) => {
+      if (!tabKey || !entry) return;
+      if (!tabExcelRegistry.has(tabKey)) tabExcelRegistry.set(tabKey, []);
+      tabExcelRegistry.get(tabKey).push(entry);
+    };
+
+    const registerTabTableExport = (tabKey, accordionTitle, moreInfo, table) => {
+      if (!table) return;
+      const rows = tableToAoA(table);
+      if (!rows.length) return;
+      registerTabExcelEntry(tabKey, {
+        accordionTitle,
+        moreInfo,
+        getSheetData: () => ({ rows })
+      });
+    };
+
+    const registerTabObjectsExport = (tabKey, accordionTitle, moreInfo, rows, columns) => {
+      if (!rows?.length || !columns?.length) return;
+      const data = objectsToAoA(rows, columns);
+      if (!data.length) return;
+      registerTabExcelEntry(tabKey, {
+        accordionTitle,
+        moreInfo,
+        getSheetData: () => ({ rows: data })
+      });
+    };
+
+    const registerTabAsyncObjectsExport = (tabKey, accordionTitle, moreInfo, columns, builder) => {
+      if (!columns?.length || typeof builder !== 'function') return;
+      registerTabExcelEntry(tabKey, {
+        accordionTitle,
+        moreInfo,
+        getSheetData: async () => {
+          const rows = await builder();
+          if (!rows?.length) return null;
+          return { rows: objectsToAoA(rows, columns) };
+        }
+      });
+    };
+
+    const registerScoreTableExport = (accordionTitle, moreInfo, table) =>
+      registerTabTableExport('score', accordionTitle, moreInfo, table);
+    const registerScoreObjectsExport = (accordionTitle, moreInfo, rows, columns) =>
+      registerTabObjectsExport('score', accordionTitle, moreInfo, rows, columns);
+    const registerScoreAsyncObjectsExport = (accordionTitle, moreInfo, columns, builder) =>
+      registerTabAsyncObjectsExport('score', accordionTitle, moreInfo, columns, builder);
+
+
     const makeDetails = (title, options = {}) => {
       const details = document.createElement('details');
       details.open = false;
@@ -12838,7 +14173,7 @@
           tr.appendChild(labelCell);
 
           const avgCell = document.createElement('td');
-          avgCell.textContent = formatScoreValue(entry.avg, '—');
+          renderScoreValueWithGrade(avgCell, entry.avg, '—');
           tr.appendChild(avgCell);
 
           const countCell = document.createElement('td');
@@ -12855,8 +14190,9 @@
 
           tbody.appendChild(tr);
         });
-        table.appendChild(tbody);
-        appendTableWithDownload(details, table, { filenameBase: contextPrefix || title.toLowerCase() });
+    table.appendChild(tbody);
+    appendTableWithDownload(details, table, { filenameBase: contextPrefix || title.toLowerCase() });
+    registerScoreTableExport(title, `${contextPrefix || title} averages`, table);
 
         // Add "Download all scans" button exporting every scan across all groups with contextual column (Domain/Website)
         const toolbar = document.createElement('div');
@@ -12865,70 +14201,72 @@
         dlBtn.type = 'button';
         dlBtn.className = 'a11y-table-download-btn';
         dlBtn.textContent = 'Download all scans';
+        const groupColumnLabelCsv = /website/i.test(contextPrefix || title) ? 'Website' : 'Domain';
+        const allScanColumns = [
+          { key: 'ContextGroup', label: groupColumnLabelCsv },
+          { key: 'name', label: 'Scan Name' },
+          { key: 'type', label: 'Type' },
+          { key: 'domain', label: 'Domain (raw)' },
+          { key: 'status', label: 'Status' },
+          { key: 'score', label: 'Score', withGrade: true },
+          { key: 'critical', label: 'Critical' },
+          { key: 'serious', label: 'Serious' },
+          { key: 'moderate', label: 'Moderate' },
+          { key: 'minor', label: 'Minor' },
+          { key: 'total', label: 'Total Issues' },
+          { key: 'pages', label: 'Pages' },
+          { key: 'lastRun', label: 'Last Run' },
+          { key: 'url', label: 'URL' }
+        ];
+
+        const buildAllScansRows = async () => {
+          const latest = await refreshMainView({ preserveState: true });
+          const sourceRows = latest.filtered || [];
+          const identifiersByDomain = new Map();
+          entries.forEach(entry => {
+            const ids = new Set(entry.rows.map(r => r.url || r.name));
+            identifiersByDomain.set(entry.label, ids);
+          });
+          const all = [];
+          sourceRows.forEach(r => {
+            let domainLabel = null;
+            for (const [label, ids] of identifiersByDomain.entries()) {
+              if (ids.has(r.url || r.name)) {
+                domainLabel = label;
+                break;
+              }
+            }
+            if (!domainLabel) return;
+            all.push({
+              ContextGroup: domainLabel,
+              name: r.name || '',
+              type: r.type || '',
+              domain: r.domain || '',
+              status: r.statusText || '',
+              score: Number.isFinite(r.scoreVal) ? r.scoreVal : '',
+              critical: r.crit != null ? r.crit : '',
+              serious: r.serious != null ? r.serious : '',
+              moderate: r.moderate != null ? r.moderate : '',
+              minor: r.minor != null ? r.minor : '',
+              total: r.total != null ? r.total : '',
+              pages: r.pages != null ? r.pages : '',
+              lastRun: r.lastRun ? r.lastRun.toISOString() : '',
+              url: r.url || ''
+            });
+          });
+          return all;
+        };
+
         dlBtn.addEventListener('click', async () => {
           try {
-            // Refresh to get current filtered rows
-            const latest = await refreshMainView({ preserveState: true });
-            const sourceRows = latest.filtered || [];
-            // Build a set of identifiers for rows included in entries to avoid domain mismatch
-            const identifiersByDomain = new Map();
-            entries.forEach(entry => {
-              const ids = new Set(entry.rows.map(r => r.url || r.name));
-              identifiersByDomain.set(entry.label, ids);
-            });
-            // Collect scans and attach Domain column (group label)
-            const all = [];
-            sourceRows.forEach(r => {
-              // Determine which group (domain) this row belongs to based on entries
-              let domainLabel = null;
-              for (const [label, ids] of identifiersByDomain.entries()) {
-                if (ids.has(r.url || r.name)) {
-                  domainLabel = label;
-                  break;
-                }
-              }
-              // Only include rows that are part of the grouped entries
-              if (!domainLabel) return;
-              all.push({
-                ContextGroup: domainLabel,
-                name: r.name || '',
-                type: r.type || '',
-                domain: r.domain || '',
-                status: r.statusText || '',
-                score: Number.isFinite(r.scoreVal) ? r.scoreVal : '',
-                critical: r.crit != null ? r.crit : '',
-                serious: r.serious != null ? r.serious : '',
-                moderate: r.moderate != null ? r.moderate : '',
-                minor: r.minor != null ? r.minor : '',
-                total: r.total != null ? r.total : '',
-                pages: r.pages != null ? r.pages : '',
-                lastRun: r.lastRun ? r.lastRun.toISOString() : '',
-                url: r.url || ''
-              });
-            });
-
-            const groupColumnLabelCsv = /website/i.test(contextPrefix || title) ? 'Website' : 'Domain';
-            downloadObjectCsv(all, [
-              { key: 'ContextGroup', label: groupColumnLabelCsv },
-              { key: 'name', label: 'Scan Name' },
-              { key: 'type', label: 'Type' },
-              { key: 'domain', label: 'Domain (raw)' },
-              { key: 'status', label: 'Status' },
-              { key: 'score', label: 'Score' },
-              { key: 'critical', label: 'Critical' },
-              { key: 'serious', label: 'Serious' },
-              { key: 'moderate', label: 'Moderate' },
-              { key: 'minor', label: 'Minor' },
-              { key: 'total', label: 'Total Issues' },
-              { key: 'pages', label: 'Pages' },
-              { key: 'lastRun', label: 'Last Run' },
-              { key: 'url', label: 'URL' }
-            ], `${sanitizeFilename(contextPrefix || title)}-all-scans`);
+            const all = await buildAllScansRows();
+            downloadObjectCsv(all, allScanColumns, `${sanitizeFilename(contextPrefix || title)}-all-scans`);
           } catch (err) {
             console.error(err);
             alert('Unable to download all scans.');
           }
         });
+        registerScoreAsyncObjectsExport(title, 'All scans detail', allScanColumns, buildAllScansRows);
         toolbar.appendChild(dlBtn);
         details.appendChild(toolbar);
       }
@@ -12983,6 +14321,113 @@
       pushSection('status', details);
     }
 
+    // Score snapshot cards
+    {
+      const section = document.createElement('section');
+      section.className = 'a11y-scan-insights-section';
+      const heading = document.createElement('h2');
+      heading.textContent = 'Score snapshot';
+      section.appendChild(heading);
+
+      const note = document.createElement('p');
+      note.className = 'a11y-scan-insights-note';
+      const noteParts = ['Metrics aggregate the Monitor scans table using the current filters (no Monitor API).'];
+      if (!completeRows.length) {
+        noteParts.push('Add at least one completed scan to populate score and issue cards.');
+      }
+      if (!completePageRows.length) {
+        noteParts.push('View-by-Pages data with completed scans populates the page cards.');
+      }
+      note.textContent = noteParts.join(' ');
+      section.appendChild(note);
+
+      const list = document.createElement('ul');
+      list.className = 'a11y-scan-insights-summary-grid a11y-scan-insights-impact-list';
+      list.setAttribute('role','list');
+
+      const scanTypeEntries = Object.entries(scoreSnapshotMetrics.scanCountsByType || {});
+      const prioritizedOrder = ['Desktop','Mobile','PDF'];
+      scanTypeEntries.sort((a, b) => {
+        const [labelA, countA] = a;
+        const [labelB, countB] = b;
+        const priorityA = prioritizedOrder.indexOf(labelA);
+        const priorityB = prioritizedOrder.indexOf(labelB);
+        if (priorityA !== -1 || priorityB !== -1) {
+          if (priorityA === -1) return 1;
+          if (priorityB === -1) return -1;
+          if (priorityA !== priorityB) return priorityA - priorityB;
+        }
+        if (countA !== countB) return countB - countA;
+        return labelA.localeCompare(labelB, undefined, { sensitivity: 'base' });
+      });
+
+      const scanBreakdowns = scanTypeEntries.map(([label, count]) => ({
+        label,
+        value: formatNumberValue(count)
+      }));
+
+      const scoreTypeEntries = Object.entries(scoreSnapshotMetrics.averageScoreByType || {});
+      scoreTypeEntries.sort((a, b) => {
+        const [labelA] = a;
+        const [labelB] = b;
+        const priorityA = prioritizedOrder.indexOf(labelA);
+        const priorityB = prioritizedOrder.indexOf(labelB);
+        if (priorityA !== -1 || priorityB !== -1) {
+          if (priorityA === -1) return 1;
+          if (priorityB === -1) return -1;
+          if (priorityA !== priorityB) return priorityA - priorityB;
+        }
+        return labelA.localeCompare(labelB, undefined, { sensitivity: 'base' });
+      });
+
+      const scoreBreakdowns = scoreTypeEntries.map(([label, avg]) => ({
+        label,
+        value: formatScoreValue(avg),
+        scoreValue: avg
+      }));
+
+      const cardDefinitions = [
+        {
+          label: 'Scans',
+          value: formatNumberValue(scoreSnapshotMetrics.scanCount),
+          breakdowns: scanBreakdowns
+        },
+        {
+          label: 'Accessibility score',
+          value: formatScoreValue(scoreSnapshotMetrics.averageScore),
+          scoreValue: scoreSnapshotMetrics.averageScore,
+          breakdowns: scoreBreakdowns
+        },
+        {
+          label: 'Total issues',
+          value: formatNumberValue(scoreSnapshotMetrics.totalIssues),
+          breakdowns: [
+            { label: 'Critical issues', value: formatNumberValue(scoreSnapshotMetrics.criticalIssues) },
+            { label: 'Serious issues', value: formatNumberValue(scoreSnapshotMetrics.seriousIssues) }
+          ]
+        },
+        {
+          label: 'Pages with issues',
+          value: formatNumberValue(scoreSnapshotMetrics.pagesWithIssues),
+          breakdowns: [
+            { label: 'Critical pages', value: formatNumberValue(scoreSnapshotMetrics.criticalPages) },
+            { label: 'Serious pages', value: formatNumberValue(scoreSnapshotMetrics.seriousPages) }
+          ]
+        }
+      ];
+
+      cardDefinitions.forEach(definition => {
+        const item = document.createElement('li');
+        item.className = 'a11y-scan-insights-impact-item';
+        item.setAttribute('role','listitem');
+        item.appendChild(createStaticImpactSummaryCard(definition));
+        list.appendChild(item);
+      });
+
+      section.appendChild(list);
+      pushSection('score', section);
+    }
+
     // Score summary (all scans)
     {
       const details = makeDetails('Score summary', { appendMeta: buildImpactSummaryMeta });
@@ -12992,24 +14437,41 @@
         scoreAll,
         total,
         scoreBandOrder,
-        'Higher scores are better. Bar width shows share of scans in each band; colors run from green (100%) to red (<50%).',
+  'Higher scores are better. Bar width shows share of scans in each band; colors run from green (100%) to red (F).',
         (r, band) => r.scoreBucket === band,
         'Score summary',
-        { filenameBase: 'score-summary-bands', groupLabel: 'All scans' }
+        {
+          filenameBase: 'score-summary-bands',
+          groupLabel: 'All scans',
+          onTableReady: table => registerScoreTableExport('Score summary', 'Band distribution', table)
+        }
       );
       if (summaryRows.length) {
+        const summaryBandColumns = [
+          { key: 'group', label: 'Group' },
+          { key: 'band', label: 'Band' },
+          { key: 'count', label: 'Scans' },
+          { key: 'percent', label: 'Percent' }
+        ];
         appendBandDownloadButton(details, summaryRows, {
           filenameBase: 'score-summary-bands-all',
           bandOrder: scoreBandOrder,
           rowFilter: (r, band) => r.scoreBucket === band,
           groupLabel: 'All scans',
-          columns: [
-            { key: 'group', label: 'Group' },
-            { key: 'band', label: 'Band' },
-            { key: 'count', label: 'Scans' },
-            { key: 'percent', label: 'Percent' }
-          ]
+          columns: summaryBandColumns
         });
+        registerScoreObjectsExport('Score summary', 'Band data', summaryRows, summaryBandColumns);
+        registerScoreAsyncObjectsExport(
+          'Score summary',
+          'Detailed scans',
+          bandDownloadDetailColumns,
+          () => buildBandDownloadDataset({
+            metricsType: 'issues',
+            bandOrder: scoreBandOrder,
+            rowFilter: (r, band) => r.scoreBucket === band,
+            groupLabel: 'All scans'
+          })
+        );
       }
       pushSection('score', details);
     }
@@ -13038,7 +14500,11 @@
             `Score distribution for ${type}.`,
             (r, band) => r.type === type && r.scoreBucket === band,
             `Score summary by type - ${type}`,
-            { filenameBase: `score-bands-${sanitizeFilename(type)}`, groupLabel: type }
+            {
+              filenameBase: `score-bands-${sanitizeFilename(type)}`,
+              groupLabel: type,
+              onTableReady: table => registerScoreTableExport('Score by scan type', `${type} bands`, table)
+            }
           );
           rows.forEach(row => {
             bandDownloadRows.push(row);
@@ -13047,18 +14513,31 @@
           });
         });
         if (bandDownloadRows.length) {
+          const typeBandColumns = [
+            { key: 'group', label: 'Scan type' },
+            { key: 'band', label: 'Band' },
+            { key: 'count', label: 'Scans' },
+            { key: 'percent', label: 'Percent' }
+          ];
           appendBandDownloadButton(details, bandDownloadRows, {
             filenameBase: 'score-bands-by-type',
             bandOrder: allTypeBandFilters,
             rowFilter: (r, typeBand) => r.type === typeBand.type && r.scoreBucket === typeBand.band,
             groupLabel: 'By Type',
-            columns: [
-              { key: 'group', label: 'Scan type' },
-              { key: 'band', label: 'Band' },
-              { key: 'count', label: 'Scans' },
-              { key: 'percent', label: 'Percent' }
-            ]
+            columns: typeBandColumns
           });
+          registerScoreObjectsExport('Score by scan type', 'Band data (all types)', bandDownloadRows, typeBandColumns);
+          registerScoreAsyncObjectsExport(
+            'Score by scan type',
+            'Detailed scans',
+            bandDownloadDetailColumns,
+            () => buildBandDownloadDataset({
+              metricsType: 'issues',
+              bandOrder: allTypeBandFilters,
+              rowFilter: (row, typeBand) => row.type === typeBand.type && row.scoreBucket === typeBand.band,
+              groupLabel: 'By Type'
+            })
+          );
         }
       }
       pushSection('score', details);
@@ -13072,24 +14551,30 @@
       appendAverageScoreSection('Avg Score by domain', domainAvgGroups, 'Avg Score by domain');
     }
 
-    {
-      // Group by website: remove trailing scan type tokens (Desktop/Mobile/PDF) from the name,
-      // and use the remaining full prefix as the website label.
-      const scanTypes = new Set(['Desktop','Mobile','PDF']);
-      const websiteMap = new Map();
-      filtered.forEach(r => {
-        const raw = (r.name || '').trim();
-        let tokens = raw.split(' - ').map(s => s.trim()).filter(Boolean);
-        if (tokens.length === 0) tokens = [(r.domain || 'Other')];
-        // If the last token is a known scan type, drop it
-        if (tokens.length > 1 && scanTypes.has(tokens[tokens.length - 1])) {
-          tokens = tokens.slice(0, -1);
-        }
-        const key = tokens.join(' - ') || (r.domain || 'Other');
-        if (!websiteMap.has(key)) websiteMap.set(key, []);
-        websiteMap.get(key).push(r);
+    const websiteGroupingTypes = new Set(['Desktop','Mobile','PDF']);
+    const getWebsiteLabel = row => {
+      if (!row) return row?.domain || 'Other';
+      const raw = (row.name || '').trim();
+      let tokens = raw.split(' - ').map(s => s.trim()).filter(Boolean);
+      if (!tokens.length) tokens = [(row.domain || 'Other')];
+      if (tokens.length > 1 && websiteGroupingTypes.has(tokens[tokens.length - 1])) {
+        tokens = tokens.slice(0, -1);
+      }
+      return tokens.join(' - ') || row.domain || 'Other';
+    };
+
+    const groupRowsByWebsite = rows => {
+      const map = new Map();
+      (rows || []).forEach(row => {
+        const label = getWebsiteLabel(row);
+        if (!map.has(label)) map.set(label, []);
+        map.get(label).push(row);
       });
-      const websiteGroups = Array.from(websiteMap.entries()).map(([label, rows]) => ({ label, rows }));
+      return map;
+    };
+
+    {
+      const websiteGroups = Array.from(groupRowsByWebsite(filtered).entries()).map(([label, rows]) => ({ label, rows }));
       appendAverageScoreSection('Avg Score by website', websiteGroups, 'Avg Score by website');
     }
 
@@ -13180,6 +14665,7 @@
           });
           table.appendChild(tbody);
           appendTableWithDownload(details, table, { filenameBase: `issue-impact-${type}` });
+          registerTabTableExport('issues', 'Issue impact bands', `${type}`, table);
         });
         const note = document.createElement('p');
         note.style.fontSize = '11px';
@@ -13214,6 +14700,22 @@
             { key: 'percent', label: 'Percent' }
           ]
         });
+        registerTabAsyncObjectsExport(
+          'issues',
+          'Issue impact bands',
+          'Detailed scans',
+          bandDownloadDetailColumns,
+          () => buildBandDownloadDataset({
+            metricsType: 'issues',
+            bandOrder: allTypeBandFilters,
+            rowFilter: (row, typeBand) =>
+              row.type === typeBand.type &&
+              row.statusKey === 'Complete' &&
+              Number.isFinite(row.scoreVal) &&
+              getImpactBandIssues(getIssueTotal(row)) === typeBand.band,
+            groupLabel: 'Issue Impact'
+          })
+        );
       }
       pushSection('issues', details);
     }
@@ -13243,6 +14745,7 @@
           details.appendChild(h3);
           const table = buildScanMetricsTable(scans, { includeSumRow: false });
           appendTableWithDownload(details, table, { filenameBase: `critical-serious-${sanitizeFilename(type)}` });
+          registerTabTableExport('issues', 'Scan Type - Issue counts', type, table);
           hasTable = true;
         });
         if (hasTable) {
@@ -13284,6 +14787,7 @@
           const sorted = sortScans(scans, 'critSerDesc');
           const table = buildScanMetricsTable(sorted, { includeSumRow: true });
           appendTableWithDownload(details, table, { filenameBase: `critical-serious-${sanitizeFilename(entry.label)}` });
+          registerTabTableExport('issues', 'Domain - Issue counts', entry.label, table);
           hasTable = true;
         });
         if (!hasDomainData) {
@@ -13296,6 +14800,46 @@
       }
       pushSection('issues', details);
     }
+
+      // Website - Issue counts
+      {
+        const details = makeDetails('Website - Issue counts', { appendMeta: buildImpactSummaryMeta });
+        const qualifyingRows = filtered.filter(r =>
+          r.statusKey === 'Complete' &&
+          (typeof r.crit === 'number' || typeof r.serious === 'number' || typeof r.total === 'number')
+        );
+        const websiteGroups = groupRowsByWebsite(qualifyingRows);
+        const entries = Array.from(websiteGroups.entries()).sort((a, b) =>
+          a[0].localeCompare(b[0], undefined, { sensitivity: 'base' })
+        );
+        if (!entries.length) {
+          const p = document.createElement('p');
+          p.textContent = 'No Complete scans with Critical or Serious counts for any website in the current filter set.';
+          details.appendChild(p);
+        } else {
+          let hasTable = false;
+          entries.forEach(([label, rows]) => {
+            const heading = document.createElement('h3');
+            heading.textContent = label;
+            details.appendChild(heading);
+            if (!rows.length) {
+              const p = document.createElement('p');
+              p.textContent = 'No Complete scans with Critical or Serious counts for this website.';
+              details.appendChild(p);
+              return;
+            }
+            const sorted = sortScans(rows, 'critSerDesc');
+            const table = buildScanMetricsTable(sorted, { includeSumRow: true });
+            appendTableWithDownload(details, table, { filenameBase: `critical-serious-${sanitizeFilename(label)}` });
+            registerTabTableExport('issues', 'Website - Issue counts', label, table);
+            hasTable = true;
+          });
+          if (hasTable) {
+            appendMonitorApiFootnote(details);
+          }
+        }
+        pushSection('issues', details);
+      }
 
   if (pageContext === 'scans') {
     pushSection('quick', buildWasSection(rowLookup));
@@ -13413,6 +14957,7 @@
           });
           table.appendChild(tbody);
           appendTableWithDownload(details, table, { filenameBase: `page-impact-${type}` });
+          registerTabTableExport('pages', 'Page impact bands', `${type}`, table);
         });
         const note = document.createElement('p');
         note.style.fontSize = '11px';
@@ -13448,6 +14993,22 @@
             { key: 'percent', label: 'Percent' }
           ]
         });
+        registerTabAsyncObjectsExport(
+          'pages',
+          'Page impact bands',
+          'Detailed scans',
+          bandDownloadDetailColumns,
+          () => buildBandDownloadDataset({
+            metricsType: 'pages',
+            bandOrder: allTypeBandFilters,
+            rowFilter: (row, typeBand) =>
+              row.type === typeBand.type &&
+              row.statusKey === 'Complete' &&
+              getPageTotal(row) > 0 &&
+              getImpactBandPages(getPageTotal(row)) === typeBand.band,
+            groupLabel: 'Page Impact'
+          })
+        );
       }
       pushSection('pages', details);
     }
@@ -13474,6 +15035,7 @@
           details.appendChild(h3);
           const table = buildPagesMetricsTable(rowsList, { includeSumRow: true });
           appendTableWithDownload(details, table, { filenameBase: `pages-impact-${sanitizeFilename(type)}` });
+          registerTabTableExport('pages', 'Scan Type - Pages with issues', type, table);
         });
       }
       pushSection('pages', details);
@@ -13505,12 +15067,45 @@
             .sort((a, b) => getPageTotal(b) - getPageTotal(a));
           const table = buildPagesMetricsTable(sorted, { includeSumRow: true });
           appendTableWithDownload(details, table, { filenameBase: `pages-impact-${sanitizeFilename(entry.label)}` });
+          registerTabTableExport('pages', 'Domain - Pages with issues', entry.label, table);
         });
         if (!hasPageDomain) {
           const p = document.createElement('p');
           p.textContent = 'No Complete scans with pages for any domain in the selected impact filter.';
           details.appendChild(p);
         }
+      }
+      pushSection('pages', details);
+    }
+
+    // Website - Pages with issues (selected impacts)
+    {
+      const details = makeDetails('Website - Pages with issues', { appendMeta: buildImpactSummaryMeta });
+      const websiteGroups = groupRowsByWebsite(pageRowsQualified);
+      const entries = Array.from(websiteGroups.entries()).sort((a, b) =>
+        a[0].localeCompare(b[0], undefined, { sensitivity: 'base' })
+      );
+      if (!entries.length) {
+        const p = document.createElement('p');
+        p.textContent = 'No Complete scans with pages for any website in the selected impact filter.';
+        details.appendChild(p);
+      } else {
+        entries.forEach(([label, rows]) => {
+          const heading = document.createElement('h3');
+          heading.textContent = label;
+          details.appendChild(heading);
+          const rowsWithPages = rows.filter(row => getPageTotal(row) > 0);
+          if (!rowsWithPages.length) {
+            const p = document.createElement('p');
+            p.textContent = 'No Complete scans with pages for this website in the selected impact filter.';
+            details.appendChild(p);
+            return;
+          }
+          const sorted = rowsWithPages.slice().sort((a, b) => getPageTotal(b) - getPageTotal(a));
+          const table = buildPagesMetricsTable(sorted, { includeSumRow: true });
+          appendTableWithDownload(details, table, { filenameBase: `pages-impact-${sanitizeFilename(label)}` });
+          registerTabTableExport('pages', 'Website - Pages with issues', label, table);
+        });
       }
       pushSection('pages', details);
     }
@@ -13630,8 +15225,6 @@
       details.appendChild(wrap);
       pushSection('status', details);
     }
-
-    const completeRows = filtered.filter(r => r.statusKey === 'Complete');
 
     function aggregateRows(rows, label) {
       if (!rows || !rows.length) return null;
@@ -13775,9 +15368,9 @@
           labelCell.textContent = entry.label;
         }
         tr.appendChild(labelCell);
-        const scoreCell = document.createElement('td');
-        scoreCell.textContent = formatScoreValue(entry.avgScore);
-        tr.appendChild(scoreCell);
+  const scoreCell = document.createElement('td');
+  renderScoreValueWithGrade(scoreCell, entry.avgScore, '—');
+  tr.appendChild(scoreCell);
         const critCell = document.createElement('td');
         critCell.textContent = String(entry.crit);
         tr.appendChild(critCell);
@@ -13800,6 +15393,7 @@
       });
       table.appendChild(tbody);
       appendTableWithDownload(details, table, { filenameBase: `${mode}-ranking` });
+  registerTabTableExport('ranking', modeLabel, 'Summary', table);
       appendMonitorApiFootnote(details);
       return details;
     }
@@ -13848,9 +15442,9 @@
         nameCell.appendChild(createScanLink(row));
         tr.appendChild(nameCell);
 
-        const scoreCell = document.createElement('td');
-        scoreCell.textContent = formatScoreValue(row.scoreVal, row.scoreText || '—');
-        tr.appendChild(scoreCell);
+  const scoreCell = document.createElement('td');
+  renderScoreValueWithGrade(scoreCell, row.scoreVal, row.scoreText || '—');
+  tr.appendChild(scoreCell);
 
         const critCell = document.createElement('td');
         critCell.textContent = String(getRowCritical(row));
@@ -13909,6 +15503,7 @@
         details.appendChild(h3);
         const table = buildTypeRankingTable(ranked);
         appendTableWithDownload(details, table, { filenameBase: `ranking-${sanitizeFilename(type)}` });
+        registerTabTableExport('ranking', 'Ranking by type', type, table);
         appendMonitorApiFootnote(details);
       });
       return details;
@@ -14025,6 +15620,30 @@
       });
       controls.appendChild(expandBtn);
       controls.appendChild(collapseBtn);
+
+      const panelExports = tabExcelRegistry.get(panel?.dataset?.tabKey) || [];
+      if (panelExports.length) {
+        const excelBtn = document.createElement('button');
+        excelBtn.type = 'button';
+        excelBtn.className = 'a11y-panel-toggle-btn';
+        excelBtn.textContent = 'Export Data (Excel)';
+        excelBtn.addEventListener('click', async () => {
+          if (excelBtn.disabled) return;
+          const original = excelBtn.textContent;
+          excelBtn.disabled = true;
+          excelBtn.textContent = 'Exporting…';
+          try {
+            await exportExcelWorkbook(panelExports, { filenameBase: `${panel.dataset.tabKey || 'tab'}-data` });
+          } catch (err) {
+            console.error(err);
+            alert(err?.message || 'Unable to export Excel data.');
+          } finally {
+            excelBtn.disabled = false;
+            excelBtn.textContent = original;
+          }
+        });
+        controls.appendChild(excelBtn);
+      }
       panel.appendChild(controls);
       sections.forEach(section => panel.appendChild(section));
       restoreAccordionState(panel, restoreState);
@@ -18608,9 +20227,13 @@
       : isScanInsightsDialog
         ? 'Show scan insights'
         : 'Show quick actions';
-    let isMinimized = false;
-    let restoreButton = null;
-    let data = null;
+  let isMinimized = false;
+  let restoreButton = null;
+  let data = null;
+  let pendingRefreshOnRestore = false;
+  let pendingRefreshData = null;
+  let pendingRefreshTabKey = null;
+  let pendingRestoreState = null;
     if (isScansDialog) {
       if (lastRenderedData) {
         data = lastRenderedData;
@@ -18679,6 +20302,9 @@
 
     const actions = document.createElement('div');
     actions.className = 'a11y-scan-report-header-actions';
+    const controlsBar = document.createElement('div');
+    controlsBar.className = 'a11y-header-filter-holder';
+    left.appendChild(controlsBar);
     let updateFilterButtonLabel = null;
     const shouldShowFilterButton = isScansDialog || isScanInsightsDialog;
     if (shouldShowFilterButton) {
@@ -18740,35 +20366,27 @@
             .catch(err => alert(err.message));
         });
       }
-      const filterHolder = document.createElement('div');
-      filterHolder.className = 'a11y-header-filter-holder';
-      filterHolder.appendChild(filterBtn);
-      if (isScansDialog) {
-        const sourceToggle = buildPageImpactSourceToggleControl();
-        if (sourceToggle) {
-          filterHolder.appendChild(sourceToggle);
-        }
-      }
-      left.appendChild(filterHolder);
+      controlsBar.appendChild(filterBtn);
     }
-
-    const body = document.createElement('div');
-    body.className = 'a11y-scan-report-body';
-    const footer = document.createElement('div');
-    footer.className = 'a11y-scan-report-footer';
-
-  // Header action buttons allow users to minimize, open settings, or close the modal entirely.
-  const minimizeBtn = document.createElement('button');
-    minimizeBtn.type = 'button';
-    minimizeBtn.className = 'a11y-scan-report-minimize';
-    minimizeBtn.textContent = 'Minimize';
-    minimizeBtn.setAttribute('aria-label', minimizeAriaLabel);
+    if (isScansDialog) {
+      const sourceToggle = buildPageImpactSourceToggleControl();
+      if (sourceToggle) {
+        const sourceGroup = document.createElement('div');
+        sourceGroup.className = 'a11y-source-toggle-group';
+        const sourceLabel = document.createElement('span');
+        sourceLabel.className = 'a11y-source-toggle-label';
+        sourceLabel.textContent = 'Source';
+        sourceGroup.appendChild(sourceLabel);
+        sourceGroup.appendChild(sourceToggle);
+        controlsBar.appendChild(sourceGroup);
+      }
+    }
 
     const settingsBtn = document.createElement('button');
     settingsBtn.type = 'button';
     settingsBtn.className = 'a11y-scan-report-settings';
     settingsBtn.textContent = 'Settings';
-  settingsBtn.setAttribute('aria-label','Settings');
+    settingsBtn.setAttribute('aria-label','Settings');
 
     settingsBtn.addEventListener('click', () => {
       openSettingsDialog().catch(err => {
@@ -18776,15 +20394,27 @@
         alert(err?.message || 'Unable to open settings.');
       });
     });
+    controlsBar.appendChild(settingsBtn);
+
+    const body = document.createElement('div');
+    body.className = 'a11y-scan-report-body';
+    const footer = document.createElement('div');
+    footer.className = 'a11y-scan-report-footer';
+
+  // Header action buttons allow users to minimize or close the modal entirely.
+  const minimizeBtn = document.createElement('button');
+    minimizeBtn.type = 'button';
+    minimizeBtn.className = 'a11y-scan-report-minimize';
+    minimizeBtn.textContent = 'Minimize';
+    minimizeBtn.setAttribute('aria-label', minimizeAriaLabel);
 
     const closeBtn = document.createElement('button');
     closeBtn.type = 'button';
     closeBtn.className = 'Dialog__close';
     closeBtn.innerHTML = '<span aria-hidden="true" class="Icon Icon--close"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" height="24" width="24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="currentColor"></path></svg></span><span class="Offscreen">Close</span>';
   minimizeBtn.addEventListener('click', () => minimizeModal());
-  actions.appendChild(minimizeBtn);
-  actions.appendChild(settingsBtn);
   actions.appendChild(closeBtn);
+  actions.appendChild(minimizeBtn);
 
     header.appendChild(actions);
     dialog.appendChild(header);
@@ -18800,14 +20430,23 @@
     if (isScansDialog || isScanInsightsDialog) {
       setBackgroundInert(dialog);
     }
-    modalContext = isScansDialog
-      ? { body, footer, updateFilterButtonLabel, mode: dialogMode }
-      : { body, footer, mode: dialogMode };
+    modalContext = {
+      body,
+      footer,
+      mode: dialogMode,
+      updateFilterButtonLabel,
+      isDialogMinimized: () => isMinimized,
+      notifyDeferredRefresh: (payload, options) => {
+        if (!payload) return;
+        scheduleDeferredRefresh(payload, options);
+      }
+    };
 
     const lastFocused = triggerButton || document.activeElement;
 
     function close() {
       closePageImpactFilterPopover({ focusButton: false });
+      resetPendingRefreshState();
       removeRestoreButton();
       isMinimized = false;
       dialog.removeAttribute('hidden');
@@ -18841,10 +20480,10 @@
       restoreButton = document.createElement('button');
       restoreButton.type = 'button';
       restoreButton.className = 'a11y-scan-report-restore';
-      restoreButton.textContent = restoreLabel;
-      restoreButton.setAttribute('aria-label', restoreLabel);
+      restoreButton.dataset.baseLabel = restoreLabel;
       restoreButton.addEventListener('click', handleRestoreButtonClick);
       document.body.appendChild(restoreButton);
+      updateRestoreButtonState(pendingRefreshOnRestore);
       restoreButton.focus();
     }
 
@@ -18853,6 +20492,54 @@
       restoreButton.removeEventListener('click', handleRestoreButtonClick);
       restoreButton.remove();
       restoreButton = null;
+    }
+
+    function updateRestoreButtonState(hasUpdates) {
+      if (!restoreButton) return;
+      const base = restoreButton.dataset.baseLabel || restoreLabel;
+      if (hasUpdates) {
+        restoreButton.classList.add('has-updates');
+        const text = `${base} (updates ready)`;
+        restoreButton.textContent = text;
+        restoreButton.setAttribute('aria-label', text);
+      } else {
+        restoreButton.classList.remove('has-updates');
+        restoreButton.textContent = base;
+        restoreButton.setAttribute('aria-label', base);
+      }
+    }
+
+    function scheduleDeferredRefresh(data, { desiredTabKey, restoreState } = {}) {
+      pendingRefreshOnRestore = true;
+      pendingRefreshData = data || pendingRefreshData;
+      pendingRefreshTabKey = desiredTabKey || pendingRefreshTabKey || currentTabKey;
+      pendingRestoreState = restoreState || pendingRestoreState || null;
+      updateRestoreButtonState(true);
+    }
+
+    function consumePendingRefresh() {
+      const payload = {
+        hasPending: pendingRefreshOnRestore,
+        data: pendingRefreshData,
+        tabKey: pendingRefreshTabKey,
+        restoreState: pendingRestoreState
+      };
+      if (pendingRefreshOnRestore) {
+        pendingRefreshOnRestore = false;
+        pendingRefreshData = null;
+        pendingRefreshTabKey = null;
+        pendingRestoreState = null;
+        updateRestoreButtonState(false);
+      }
+      return payload;
+    }
+
+    function resetPendingRefreshState() {
+      pendingRefreshOnRestore = false;
+      pendingRefreshData = null;
+      pendingRefreshTabKey = null;
+      pendingRestoreState = null;
+      updateRestoreButtonState(false);
     }
 
     function minimizeModal() {
@@ -18875,11 +20562,23 @@
       if (isScansDialog || isScanInsightsDialog) {
         setBackgroundInert(dialog);
       }
+      const deferred = consumePendingRefresh();
       removeRestoreButton();
       if (focus) {
         closeBtn.focus();
       }
       logWidget('Modal restored');
+      if (deferred.hasPending) {
+        if (deferred.data) {
+          renderModalContentsWithData(deferred.data, {
+            desiredTabKey: deferred.tabKey,
+            restoreState: deferred.restoreState
+          });
+          logWidget('Deferred refresh applied on restore', { tab: currentTabKey });
+        } else if (isScansDialog) {
+          refreshMainView({ preserveState: true, targetTabKey: deferred.tabKey }).catch(err => console.error(err));
+        }
+      }
     }
 
     function onKeydown(e) {
