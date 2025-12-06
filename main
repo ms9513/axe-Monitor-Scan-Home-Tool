@@ -2,9 +2,10 @@
   // Core widget state and configuration that remain stable for the lifespan of the injected script.
   const isDequeHost = location.hostname.endsWith('dequecloud.com');
   const scanInsightsTabs = [
+    { key: 'summary', label: 'Scan Summary' },
     { key: 'scoreTrend', label: 'Score Trend' },
-    { key: 'health', label: 'Issue trends' },
-    { key: 'progress', label: 'Progress & remediation' }
+  { key: 'health', label: 'Issue Trends' },
+  { key: 'progress', label: 'Progress & Remediation' }
   ];
   const scanInsightsPageLimit = 400;
   const scanInsightsPagePageSize = 100;
@@ -489,12 +490,17 @@
     wrapper.className = 'a11y-scan-insights-placeholder';
     const { scanId, runNumber } = scanInsightsState.context || {};
     const runLabel = runNumber != null ? `run ${runNumber}` : 'latest run';
-    if (tabKey === 'scoreTrend') {
-      wrapper.textContent = `Score trend insights will summarize every available run for scan ${scanId || ''}.`;
+    const scanLabel = scanId ? `scan ${scanId}` : 'this scan';
+    if (tabKey === 'summary') {
+      wrapper.textContent = `Scan summary metrics will populate after the latest run for ${scanLabel} completes.`;
+    } else if (tabKey === 'scoreTrend') {
+      wrapper.textContent = `Score trend insights will summarize every available run for ${scanLabel}.`;
     } else if (tabKey === 'progress') {
-      wrapper.textContent = `Progress & remediation data will compare ${runLabel} with the previous run once analytics are available.`;
+      wrapper.textContent = `Progress & Remediation data will compare ${runLabel} with the previous run once analytics are available.`;
+    } else if (tabKey === 'coverage') {
+      wrapper.textContent = `Coverage insights will show detailed page-level stats for ${scanLabel} once data collection finishes.`;
     } else {
-      wrapper.textContent = `Issue trend charts will load for scan ${scanId || ''} (${runLabel}).`;
+      wrapper.textContent = `Issue Trends charts will load for ${scanLabel} (${runLabel}).`;
     }
     return wrapper;
   }
@@ -536,142 +542,107 @@
     return container;
   }
 
-  function buildScanInsightsSnapshotCards(data) {
-    const latest = data?.latest;
-    if (!latest) return null;
-    const groups = [
-      buildSnapshotGroup('Snapshot', buildSnapshotOverviewCards(latest)),
-      buildSnapshotGroup('Issue snapshot', buildIssueSnapshotCards(latest)),
-      buildSnapshotGroup('Pages snapshot', buildPageSnapshotCards(latest))
-    ].filter(Boolean);
-    if (!groups.length) return null;
-    const wrapper = document.createElement('div');
-    wrapper.className = 'a11y-scan-insights-snapshot-row';
-    wrapper.setAttribute('role','region');
-    wrapper.setAttribute('aria-label','Scan snapshot overview');
-    groups.forEach(group => wrapper.appendChild(group));
-    return wrapper;
-  }
-
-  function buildSnapshotGroup(title, cards) {
-    const normalized = (cards || []).filter(Boolean);
-    if (!normalized.length) return null;
-    const group = document.createElement('section');
-    group.className = 'a11y-scan-insights-snapshot-group';
-    const heading = document.createElement('h3');
+  function buildComparisonImpactSection(title, metricConfigs = [], currentRun, comparisonRun) {
+    if (!currentRun || !metricConfigs.length) return null;
+    const section = document.createElement('section');
+    section.className = 'a11y-scan-insights-section';
+    const heading = document.createElement('h2');
     heading.textContent = title;
-    group.appendChild(heading);
-    const grid = document.createElement('div');
-    grid.className = 'a11y-scan-insights-snapshot-grid';
-    normalized.forEach(card => grid.appendChild(card));
-    group.appendChild(grid);
-    return group;
-  }
-
-  function buildSnapshotOverviewCards(latest) {
-    const cards = [];
-    const scorePercent = getScorePercent(latest);
-    const grade = getScoreLetterGrade(scorePercent);
-    const scoreCard = createMetricCard({
-      label: 'Accessibility score',
-      value: formatScoreValue(scorePercent),
-      hint: grade ? `Grade ${grade}` : null
+    section.appendChild(heading);
+    const list = document.createElement('ul');
+    list.className = 'a11y-scan-insights-summary-grid a11y-scan-insights-impact-list';
+    list.setAttribute('role','list');
+    metricConfigs.forEach(config => {
+      if (!config || !config.label || typeof config.getValue !== 'function') return;
+      const current = config.getValue(currentRun);
+      const previous = comparisonRun && typeof config.getValue === 'function'
+        ? config.getValue(comparisonRun)
+        : Number.NaN;
+      const definition = {
+        label: config.label,
+        current,
+        previous,
+        preferLower: config.preferLower === true,
+        changeFormatter: config.changeFormatter,
+        valueFormatter: config.valueFormatter || formatNumberValue,
+        valueIsScore: config.valueIsScore === true
+      };
+      if (definition.valueIsScore) {
+        const scoreOverride = typeof config.getScoreValue === 'function'
+          ? config.getScoreValue(currentRun)
+          : current;
+        if (Number.isFinite(scoreOverride)) {
+          definition.scoreValue = scoreOverride;
+        }
+      }
+      const item = document.createElement('li');
+      item.className = 'a11y-scan-insights-impact-item';
+      item.setAttribute('role','listitem');
+      item.appendChild(createImpactSummaryCard(definition));
+      list.appendChild(item);
     });
-    enhanceSnapshotScoreCard(scoreCard, scorePercent);
-    cards.push(scoreCard);
-
-    const completedHint = formatDateTimeLabel(latest?.completedAt) || 'Completion pending';
-    cards.push(
-      createMetricCard({
-        label: 'Latest run',
-        value: formatRunLabel(latest),
-        hint: completedHint
-      })
-    );
-
-    const statusLabel = capitalizeFirstLetter(latest?.status || '');
-    cards.push(
-      createMetricCard({
-        label: 'Run duration',
-        value: formatDuration(latest?.durationSeconds),
-        hint: statusLabel || null
-      })
-    );
-    return cards;
+    section.appendChild(list);
+    return section;
   }
 
-  function buildIssueSnapshotCards(latest) {
-    const cards = [];
-    cards.push(
-      createMetricCard({
-        label: 'Total issues',
-        value: formatNumberValue(latest?.totalIssues)
-      })
-    );
-    const highImpact = calculateHighImpactCount(latest);
-    cards.push(
-      createMetricCard({
-        label: 'High-impact issues',
-        value: formatNumberValue(highImpact)
-      })
-    );
-    const issueCounts = latest?.issueCounts || {};
-    const needsReviewCount = coerceNumber(issueCounts.needsReview, Number.NaN);
-    cards.push(
-      createMetricCard({
-        label: 'Needs review issues',
-        value: formatNumberValue(needsReviewCount)
-      })
-    );
-    return cards;
+  function getPagesScannedValue(run) {
+    if (!run) return null;
+    const pageCounts = run?.pageCounts || {};
+    const completedPages = getCompletedPageCount(run);
+    const fallbackTotal = coerceNumber(pageCounts.total ?? run?.totalPages, Number.NaN);
+    if (Number.isFinite(completedPages)) return completedPages;
+    if (Number.isFinite(fallbackTotal)) return fallbackTotal;
+    return null;
   }
 
-  function buildPageSnapshotCards(latest) {
-    const cards = [];
-    const pageCounts = latest?.pageCounts || {};
-    const completedPages = getCompletedPageCount(latest);
-    const fallbackTotal = coerceNumber(pageCounts.total ?? latest?.totalPages, Number.NaN);
-    const pagesScanned = Number.isFinite(completedPages)
-      ? completedPages
-      : Number.isFinite(fallbackTotal)
-        ? fallbackTotal
-        : null;
-    cards.push(
-      createMetricCard({
-        label: 'Pages scanned',
-        value: formatNumberValue(pagesScanned)
-      })
-    );
-    const pagesWithIssues = calculatePagesWithIssues(latest);
-    cards.push(
-      createMetricCard({
-        label: 'Pages with issues',
-        value: formatNumberValue(pagesWithIssues)
-      })
-    );
+  function getHealthyPagesValue(run) {
+    if (!run) return null;
+    const pageCounts = run?.pageCounts || {};
     let healthyPages = coerceNumber(pageCounts.withoutIssues, Number.NaN);
     if (!Number.isFinite(healthyPages)) {
+      const pagesScanned = getPagesScannedValue(run);
+      const pagesWithIssues = calculatePagesWithIssues(run);
       if (Number.isFinite(pagesScanned) && Number.isFinite(pagesWithIssues)) {
         healthyPages = Math.max(0, pagesScanned - pagesWithIssues);
       } else {
-        healthyPages = Number.NaN;
+        healthyPages = null;
       }
     }
-    cards.push(
-      createMetricCard({
-        label: 'Healthy pages',
-        value: formatNumberValue(healthyPages)
-      })
-    );
-    return cards;
+    return healthyPages;
   }
 
-  function enhanceSnapshotScoreCard(card, scoreValue) {
-    if (!card) return;
-    const valueEl = card.querySelector('.a11y-scan-insights-card-value');
-    if (!valueEl) return;
-    valueEl.textContent = '';
-    valueEl.appendChild(createScoreValueWithGrade(scoreValue, { size: 'compact' }));
+  function buildPagesSnapshotSection(latest, comparisonRun) {
+    if (!latest) return null;
+    const metrics = [
+      { label: 'Pages scanned', getValue: getPagesScannedValue },
+      { label: 'Pages with issues', getValue: calculatePagesWithIssues, preferLower: true },
+      { label: 'Healthy pages', getValue: getHealthyPagesValue }
+    ];
+    return buildComparisonImpactSection('Pages snapshot', metrics, latest, comparisonRun);
+  }
+
+  function buildIssueSnapshotSection(latest, comparisonRun) {
+    if (!latest) return null;
+    const metrics = [
+      { label: 'Total issues', getValue: run => coerceNumber(run?.totalIssues, Number.NaN), preferLower: true },
+      { label: 'Critical issues', getValue: run => coerceNumber(run?.issueCounts?.critical, Number.NaN), preferLower: true },
+      { label: 'Serious issues', getValue: run => coerceNumber(run?.issueCounts?.serious, Number.NaN), preferLower: true }
+    ];
+    return buildComparisonImpactSection('Issue snapshot', metrics, latest, comparisonRun);
+  }
+
+  function getComparisonRunCandidate(data) {
+    if (!data) return null;
+    if (data.previous) return data.previous;
+    if (Array.isArray(data.completedRuns)) {
+      const latestNumber = data.latest?.runNumber;
+      const alternate = data.completedRuns.find(run => run && run.runNumber !== latestNumber);
+      if (alternate) return alternate;
+    }
+    if (data.oldest && data.oldest !== data.latest) {
+      return data.oldest;
+    }
+    return null;
   }
 
   function retryScanInsightsLoad() {
@@ -680,11 +651,32 @@
     ensureScanInsightsData().catch(err => console.warn('Scan insights reload failed', err));
   }
 
+  function renderScanInsightsSummaryTab(target, data) {
+    const latest = data?.latest;
+    const comparisonRun = getComparisonRunCandidate(data);
+    const pagesSection = buildPagesSnapshotSection(latest, comparisonRun);
+    if (pagesSection) {
+      target.appendChild(pagesSection);
+    } else {
+      target.appendChild(buildScanInsightsPreface('summary'));
+    }
+
+    const baseRuns = Array.isArray(data?.runs) && data.runs.length ? data.runs : data?.completedRuns || [];
+    const sortedRuns = sortRunsByCompletedAtAscending(baseRuns.filter(run => run && isRunCompleted(run)));
+    if (sortedRuns.length) {
+      const newestRun = sortedRuns[sortedRuns.length - 1];
+      target.appendChild(buildScoreTrendTableSection(sortedRuns, newestRun));
+    } else {
+      target.appendChild(buildScanInsightsNote('Run history details will appear after at least one completed run.'));
+    }
+  }
+
   function renderScanInsightsHealthTab(target, data) {
     const runs = data?.completedRuns;
-    const snapshotRow = buildScanInsightsSnapshotCards(data);
-    if (snapshotRow) {
-      target.appendChild(snapshotRow);
+    const comparisonRun = getComparisonRunCandidate(data);
+    const issueSection = buildIssueSnapshotSection(data?.latest, comparisonRun);
+    if (issueSection) {
+      target.appendChild(issueSection);
     }
     if (!runs || !runs.length) {
       target.appendChild(buildScanInsightsPreface('health'));
@@ -701,12 +693,8 @@
     target.appendChild(buildWeightedDensitySection(recentRuns));
   }
 
-  // Builds the "Progress & remediation" tab which compares the latest three runs.
+  // Builds the "Progress & Remediation" tab which compares the latest three runs.
   function renderScanInsightsProgressTab(target, data) {
-    const snapshotRow = buildScanInsightsSnapshotCards(data);
-    if (snapshotRow) {
-      target.appendChild(snapshotRow);
-    }
     if (!data?.previous) {
       const msg = document.createElement('p');
       msg.className = 'a11y-scan-insights-placeholder';
@@ -757,10 +745,6 @@
   function renderScanInsightsScoreTrendTab(target, data) {
     const baseRuns = Array.isArray(data?.runs) && data.runs.length ? data.runs : data?.completedRuns || [];
     const sortedRuns = sortRunsByCompletedAtAscending(baseRuns.filter(run => run && isRunCompleted(run)));
-    const snapshotRow = buildScanInsightsSnapshotCards(data);
-    if (snapshotRow) {
-      target.appendChild(snapshotRow);
-    }
     if (!sortedRuns.length) {
       target.appendChild(buildScanInsightsPreface('scoreTrend'));
       return;
@@ -769,7 +753,6 @@
     const newestRun = sortedRuns[sortedRuns.length - 1];
     target.appendChild(buildScoreTrendKpiSection(oldestRun, newestRun));
     target.appendChild(buildScoreTrendChartSection(sortedRuns, oldestRun, newestRun));
-    target.appendChild(buildScoreTrendTableSection(sortedRuns, newestRun));
   }
 
   // Creates the KPI summary row that highlights how the latest run compares with the earliest run in view.
@@ -788,30 +771,10 @@
         current: getScorePercent(newestRun),
         previous: getScorePercent(oldestRun),
         scoreValue: getScorePercent(newestRun),
+        valueIsScore: true,
         valueFormatter: value => Number.isFinite(value) ? `${value.toFixed(1)}%` : '—',
         changeFormatter: delta => `${Math.abs(delta).toFixed(1)}%`,
         preferLower: false
-      },
-      {
-        label: 'Total issues',
-        current: coerceNumber(newestRun?.totalIssues, Number.NaN),
-        previous: coerceNumber(oldestRun?.totalIssues, Number.NaN),
-        valueFormatter: formatNumberValue,
-        preferLower: true
-      },
-      {
-        label: 'Pages with issues',
-        current: calculatePagesWithIssues(newestRun),
-        previous: calculatePagesWithIssues(oldestRun),
-        valueFormatter: formatNumberValue,
-        preferLower: true
-      },
-      {
-        label: 'Pages with critical issues',
-        current: coerceNumber(newestRun?.pageCounts?.critical, Number.NaN),
-        previous: coerceNumber(oldestRun?.pageCounts?.critical, Number.NaN),
-        valueFormatter: formatNumberValue,
-        preferLower: true
       }
     ];
     metricDefinitions.forEach(definition => {
@@ -853,7 +816,8 @@
         label: formatRunLabel(run),
         value: getScorePercent(run),
         subtitle: formatDateTimeLabel(run?.completedAt) || 'Completion pending',
-        isCurrent: highlightRunNumber != null && run?.runNumber === highlightRunNumber
+        isCurrent: highlightRunNumber != null && run?.runNumber === highlightRunNumber,
+        showScoreGrade: true
       }))
       .filter(point => Number.isFinite(point.value));
     const oldestScore = getScorePercent(oldestRun);
@@ -1106,7 +1070,7 @@
       labelSpan.textContent = fallbackText;
     }
     button.dataset.sortLabel = labelSpan.textContent.trim() || fallbackText;
-    button.setAttribute('aria-label', `Sort by ${button.dataset.sortLabel}`);
+    button.setAttribute('aria-label', button.dataset.sortLabel);
     th.textContent = '';
     button.appendChild(labelSpan);
     button.appendChild(indicator);
@@ -1938,7 +1902,24 @@
       }
       const value = document.createElement('span');
       value.className = 'a11y-scan-insights-line-value';
-      value.textContent = valueFormatter(point.value);
+      const formattedValue = typeof valueFormatter === 'function'
+        ? valueFormatter(point.value)
+        : point.value;
+      if (formattedValue instanceof Node) {
+        value.appendChild(formattedValue);
+      } else {
+        const text = formattedValue == null || formattedValue === ''
+          ? '—'
+          : String(formattedValue);
+        value.appendChild(document.createTextNode(text));
+      }
+      if (point.showScoreGrade) {
+        const gradeChip = createScoreGradeChip(point.value, { size: 'compact' });
+        if (gradeChip) {
+          value.appendChild(document.createTextNode(' '));
+          value.appendChild(gradeChip);
+        }
+      }
       item.appendChild(label);
       if (point.subtitle) {
         const subtitle = document.createElement('span');
@@ -2377,7 +2358,9 @@
       previous,
       preferLower = false,
       changeFormatter,
-      valueFormatter = formatNumberValue
+      valueFormatter = formatNumberValue,
+      valueIsScore = false,
+      scoreValue
     } = definition || {};
     const description = createScoreTrendChangeSummary(current, previous, {
       preferLower,
@@ -2394,8 +2377,9 @@
     const valueEl = document.createElement('p');
     valueEl.className = 'a11y-scan-insights-impact-value';
     const displayText = formattedValue == null || formattedValue === '' ? '—' : formattedValue;
-    if (Number.isFinite(definition?.scoreValue)) {
-      const wrap = createScoreValueWithGrade(definition.scoreValue, { fallback: displayText });
+    const resolvedScoreValue = Number.isFinite(scoreValue) ? scoreValue : Number.isFinite(current) ? current : null;
+    if (valueIsScore && Number.isFinite(resolvedScoreValue)) {
+      const wrap = createScoreValueWithGrade(resolvedScoreValue, { fallback: displayText });
       valueEl.appendChild(wrap);
     } else {
       valueEl.textContent = displayText;
@@ -2414,12 +2398,19 @@
       const { leadingText = '', trailingText = '', previousValue, formattedPrevious } = description;
       trendEl.textContent = '';
       if (leadingText) trendEl.append(leadingText);
-      const wrap = createScoreValueWithGrade(previousValue, {
-        fallback: formattedPrevious || formatScoreValue(previousValue),
-        size: 'compact',
-        formattedText: formattedPrevious
-      });
-      trendEl.appendChild(wrap);
+      const previousText = formattedPrevious ?? (valueFormatter ? valueFormatter(previousValue) : formatNumberValue(previousValue));
+      if (valueIsScore && Number.isFinite(previousValue)) {
+        const wrap = createScoreValueWithGrade(previousValue, {
+          fallback: previousText || formatScoreValue(previousValue),
+          size: 'compact',
+          formattedText: previousText
+        });
+        trendEl.appendChild(wrap);
+      } else {
+        const span = document.createElement('span');
+        span.textContent = previousText == null || previousText === '' ? '—' : previousText;
+        trendEl.appendChild(span);
+      }
       if (trailingText) trendEl.append(trailingText);
     } else if (description && typeof description === 'object' && description.text) {
       trendEl.textContent = description.text;
@@ -2432,9 +2423,17 @@
 
   // Simpler variant of the impact card that omits arrows/changes for static summaries.
   function createStaticImpactSummaryCard(definition = {}) {
-    const { label, value, helperText, breakdowns, scoreValue } = definition;
+    const { label, value, helperText, breakdowns, scoreValue, cardClassName } = definition;
     const card = document.createElement('div');
     card.className = 'a11y-scan-insights-impact-card impact-neutral';
+    if (cardClassName) {
+      const extras = Array.isArray(cardClassName)
+        ? cardClassName
+        : typeof cardClassName === 'string'
+          ? cardClassName.split(/\s+/)
+          : [];
+      extras.filter(Boolean).forEach(cls => card.classList.add(cls));
+    }
     card.setAttribute('aria-label', `${label || 'Metric'} summary`);
 
     const valueEl = document.createElement('p');
@@ -2465,7 +2464,28 @@
         const val = document.createElement('span');
         val.className = 'breakdown-value';
         const displayValue = entry.value == null || entry.value === '' ? '—' : entry.value;
-        if (Number.isFinite(entry.scoreValue)) {
+        if (typeof entry.onClick === 'function') {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'a11y-breakdown-button';
+          button.textContent = displayValue;
+          const ariaLabel = entry.ariaLabel || `${entry.label || label || 'Breakdown'} details`;
+          button.setAttribute('aria-label', ariaLabel);
+          button.disabled = entry.disabled === true;
+          button.addEventListener('click', () => {
+            if (button.disabled) return;
+            try {
+              const result = entry.onClick(entry, button);
+              if (result && typeof result.catch === 'function') {
+                result.catch(err => console.error('Breakdown action failed', err));
+              }
+            } catch (err) {
+              console.error('Breakdown action failed', err);
+              alert('Unable to open breakdown right now. Please try again.');
+            }
+          });
+          val.appendChild(button);
+        } else if (Number.isFinite(entry.scoreValue)) {
           const wrap = createScoreValueWithGrade(entry.scoreValue, {
             fallback: displayValue,
             size: 'compact',
@@ -3089,7 +3109,9 @@
       return;
     }
 
-    if (tabKey === 'scoreTrend') {
+    if (tabKey === 'summary') {
+      renderScanInsightsSummaryTab(target, scanInsightsState.data);
+    } else if (tabKey === 'scoreTrend') {
       renderScanInsightsScoreTrendTab(target, scanInsightsState.data);
     } else if (tabKey === 'progress') {
       renderScanInsightsProgressTab(target, scanInsightsState.data);
@@ -4815,6 +4837,9 @@
       flex-direction: column;
       align-items: flex-start;
       gap: 6px;
+      flex: 1 1 auto;
+      min-width: 0;
+      order: 1;
     }
 
     .a11y-header-filter-holder {
@@ -4837,6 +4862,7 @@
       display: flex;
       align-items: center;
       gap: 8px;
+      order: 2;
     }
 
     .a11y-scan-report-close {
@@ -5572,7 +5598,6 @@
     .a11y-scan-insights-snapshot-grid .a11y-scan-insights-card {
       height: 100%;
     }
-    .a11y-scan-insights-summary-grid,
     .a11y-scan-insights-metric-grid,
     .a11y-scan-insights-coverage-grid {
       display: grid;
@@ -5580,7 +5605,9 @@
       grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
     }
     .a11y-scan-insights-summary-grid {
-      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
       list-style: none;
       padding: 0;
       margin: 0;
@@ -5588,6 +5615,29 @@
     .a11y-scan-insights-summary-grid > li,
     .a11y-scan-insights-impact-item {
       list-style: none;
+    }
+    .a11y-scan-insights-summary-grid > li {
+      flex: 1 1 25%;
+      max-width: 25%;
+      min-width: 220px;
+    }
+    @media (max-width: 1280px) {
+      .a11y-scan-insights-summary-grid > li {
+        flex-basis: 33.3333%;
+        max-width: 33.3333%;
+      }
+    }
+    @media (max-width: 960px) {
+      .a11y-scan-insights-summary-grid > li {
+        flex-basis: 50%;
+        max-width: 50%;
+      }
+    }
+    @media (max-width: 640px) {
+      .a11y-scan-insights-summary-grid > li {
+        flex-basis: 100%;
+        max-width: 100%;
+      }
     }
     .a11y-scan-insights-impact-card {
       position: relative;
@@ -5671,8 +5721,54 @@
       font-size: 0.85rem;
       color: #475569;
     }
+    .a11y-scan-insights-impact-breakdowns .breakdown-value {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+    .a11y-scan-insights-impact-breakdowns .breakdown-value {
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 0.35rem;
+      margin-left: auto;
+      text-align: right;
+    }
     .a11y-scan-insights-impact-breakdowns .breakdown-label {
       font-weight: 500;
+    }
+    .a11y-breakdown-button {
+      padding: 0;
+      margin: 0;
+      border: none;
+      background: none;
+      font: inherit;
+      font-weight: 600;
+      color: #1d4ed8;
+      cursor: pointer;
+      text-decoration: underline;
+    }
+    .a11y-breakdown-button:hover {
+      color: #0f172a;
+    }
+    .a11y-breakdown-button:focus-visible {
+      outline: 2px solid #b51ad1;
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+    .a11y-scan-insights-impact-card.is-scans-card .a11y-breakdown-button {
+      color: #0f172a;
+      text-decoration-color: #0f172a;
+    }
+    .a11y-scan-insights-impact-card.is-scans-card .a11y-breakdown-button:hover,
+    .a11y-scan-insights-impact-card.is-scans-card .a11y-breakdown-button:focus-visible {
+      color: #0f172a;
+      text-decoration-color: #0f172a;
+    }
+    .a11y-breakdown-button:disabled {
+      color: #94a3b8;
+      cursor: not-allowed;
+      text-decoration: none;
     }
     .a11y-score-value-with-grade {
       display: inline-flex;
@@ -5915,7 +6011,7 @@
       cursor: pointer;
     }
     .a11y-sort-button:focus-visible {
-      outline: 2px solid #2563eb;
+      outline: 2px solid #b51ad1;
       outline-offset: 2px;
       border-radius: 6px;
     }
@@ -5948,6 +6044,23 @@
     }
     .a11y-scan-insights-table tr.is-current-run {
       background: rgba(59,130,246,0.08);
+    }
+    .a11y-empty-table-state {
+      text-align: center;
+      padding: 1rem;
+      color: #475569;
+      font-size: 0.95rem;
+      font-style: italic;
+    }
+    .a11y-filter-dialog.a11y-scans-dialog {
+      width: min(96vw, 1280px);
+      max-width: 1280px;
+      max-height: 85vh;
+      padding: 18px 24px 16px;
+    }
+    .a11y-scans-dialog .a11y-filter-content {
+      max-height: none;
+      flex: 1;
     }
     .a11y-scan-insights-list {
       list-style: none;
@@ -12639,7 +12752,15 @@
   // --- Scan list dialog (from counts) ---
 
   function openScansListDialog(contextLabel, scans, onClose, options = {}) {
-    if (!scans || !scans.length) return;
+    const allowEmpty = options.allowEmpty === true;
+    const rows = Array.isArray(scans) ? scans.slice() : [];
+    if (!rows.length && !allowEmpty) return;
+
+    const triggerElement = options.triggerElement && typeof options.triggerElement.focus === 'function'
+      ? options.triggerElement
+      : null;
+    const fallbackFocus = document.activeElement;
+    const focusReturnTarget = triggerElement || fallbackFocus;
 
     const dialogMode = options.mode || 'issues';
     const downloadBase = options.filenameBase || (dialogMode === 'pages' ? 'page-impact-drilldown' : 'scan-drilldown');
@@ -12701,7 +12822,7 @@
     table.appendChild(thead);
 
     const tbody = document.createElement('tbody');
-    scans.forEach(r => {
+    rows.forEach(r => {
       const tr = document.createElement('tr');
 
       const nameCell = document.createElement('th');
@@ -12771,8 +12892,18 @@
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
+    if (!rows.length) {
+      const emptyRow = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = baseHeaders.length + bodyHeaders.length + trailingHeaders.length;
+      td.className = 'a11y-empty-table-state';
+      td.textContent = 'No scans match this breakdown yet.';
+      emptyRow.appendChild(td);
+      tbody.appendChild(emptyRow);
+    }
+
     appendTableWithDownload(content, table, { filenameBase: downloadBase, buttonLabel: 'Download CSV' });
-  appendMonitorApiFootnote(content);
+    appendMonitorApiFootnote(content);
     dialog.appendChild(content);
 
     const footer = document.createElement('div');
@@ -12787,8 +12918,6 @@
     overlay.appendChild(dialog);
     appendOverlayAfterFooter(overlay);
 
-    const lastFocused = document.activeElement;
-
     function close() {
       document.removeEventListener('keydown', onKeydown, true);
       overlay.remove();
@@ -12802,7 +12931,14 @@
           console.error(err);
         }
       }
-      if (lastFocused && lastFocused.focus) lastFocused.focus();
+      const target = focusReturnTarget && typeof focusReturnTarget.focus === 'function'
+        ? focusReturnTarget
+        : null;
+      if (target && target.isConnected) {
+        target.focus();
+      } else if (fallbackFocus && typeof fallbackFocus.focus === 'function') {
+        fallbackFocus.focus();
+      }
     }
 
     function onKeydown(e) {
@@ -12918,11 +13054,14 @@
         if (options.openDialog) {
           options.openDialog(sorted);
         } else {
+          const dialogOptions = Object.assign({}, options.dialogOptions, {
+            triggerElement: btn
+          });
           openScansListDialog(
             context,
             sorted,
             () => refreshMainView({ preserveState: true }),
-            options.dialogOptions || {}
+            dialogOptions
           );
         }
       } catch (e) {
@@ -14110,6 +14249,36 @@
       sectionsByTab[tabKey].push(details);
     };
 
+    const appendSnapshotSection = (tabKey, title, cards, { noteText } = {}) => {
+      if (!tabKey || !cards?.length) return;
+      const section = document.createElement('section');
+      section.className = 'a11y-scan-insights-section';
+      if (title) {
+        const heading = document.createElement('h2');
+        heading.textContent = title;
+        section.appendChild(heading);
+      }
+      if (noteText) {
+        const note = document.createElement('p');
+        note.className = 'a11y-scan-insights-note';
+        note.textContent = noteText;
+        section.appendChild(note);
+      }
+      const list = document.createElement('ul');
+      list.className = 'a11y-scan-insights-summary-grid a11y-scan-insights-impact-list';
+      list.setAttribute('role','list');
+      cards.forEach(definition => {
+        if (!definition) return;
+        const item = document.createElement('li');
+        item.className = 'a11y-scan-insights-impact-item';
+        item.setAttribute('role','listitem');
+        item.appendChild(createStaticImpactSummaryCard(definition));
+        list.appendChild(item);
+      });
+      section.appendChild(list);
+      pushSection(tabKey, section);
+    };
+
     const getDomainRowsForEntry = (entry, aggregatesMap) => {
       const sections = entry.type === 'group' ? entry.children : [entry];
       const rows = [];
@@ -14273,6 +14442,132 @@
       pushSection('score', details);
     };
 
+    // Snapshot cards reused across tabs
+    {
+      const scanTypeEntries = Object.entries(scoreSnapshotMetrics.scanCountsByType || {});
+      const prioritizedOrder = ['Desktop','Mobile','PDF'];
+      scanTypeEntries.sort((a, b) => {
+        const [labelA, countA] = a;
+        const [labelB, countB] = b;
+        const priorityA = prioritizedOrder.indexOf(labelA);
+        const priorityB = prioritizedOrder.indexOf(labelB);
+        if (priorityA !== -1 || priorityB !== -1) {
+          if (priorityA === -1) return 1;
+          if (priorityB === -1) return -1;
+          if (priorityA !== priorityB) return priorityA - priorityB;
+        }
+        if (countA !== countB) return countB - countA;
+        return labelA.localeCompare(labelB, undefined, { sensitivity: 'base' });
+      });
+
+      const isScansSummaryMode = mode === 'scans';
+      const scansByType = new Map();
+      if (isScansSummaryMode) {
+        (filtered || []).forEach(row => {
+          if (!row) return;
+          const key = row.type || 'Other';
+          if (!scansByType.has(key)) scansByType.set(key, []);
+          scansByType.get(key).push(row);
+        });
+      }
+
+      const scanBreakdowns = scanTypeEntries.map(([label, count]) => {
+        const entry = {
+          label,
+          value: formatNumberValue(count)
+        };
+        if (isScansSummaryMode && typeof openScansListDialog === 'function') {
+          entry.onClick = (_entry, triggerButton) => {
+            const typeRows = scansByType.get(label) || [];
+            const sortedRows = sortScans(typeRows, 'scoreThenName');
+            const dialogTitle = `${label} scans`;
+            openScansListDialog(dialogTitle, sortedRows, null, {
+              allowEmpty: true,
+              filenameBase: `scan-breakdown-${sanitizeFilename(label)}`,
+              triggerElement: triggerButton
+            });
+          };
+          const numericCount = Number(count);
+          const formatted = Number.isFinite(numericCount)
+            ? numericCount.toLocaleString()
+            : String(count ?? '0');
+          entry.ariaLabel = `${label} scans (${formatted})`;
+        }
+        return entry;
+      });
+
+      const scoreTypeEntries = Object.entries(scoreSnapshotMetrics.averageScoreByType || {});
+      scoreTypeEntries.sort((a, b) => {
+        const [labelA] = a;
+        const [labelB] = b;
+        const priorityA = prioritizedOrder.indexOf(labelA);
+        const priorityB = prioritizedOrder.indexOf(labelB);
+        if (priorityA !== -1 || priorityB !== -1) {
+          if (priorityA === -1) return 1;
+          if (priorityB === -1) return -1;
+          if (priorityA !== priorityB) return priorityA - priorityB;
+        }
+        return labelA.localeCompare(labelB, undefined, { sensitivity: 'base' });
+      });
+
+      const scoreBreakdowns = scoreTypeEntries.map(([label, avg]) => ({
+        label,
+        value: formatScoreValue(avg),
+        scoreValue: avg
+      }));
+
+      const scansCardDefinition = {
+        label: 'Scans',
+        value: formatNumberValue(scoreSnapshotMetrics.scanCount),
+        breakdowns: scanBreakdowns,
+        cardClassName: 'is-scans-card'
+      };
+      const accessibilityCardDefinition = {
+        label: 'Accessibility score',
+        value: formatScoreValue(scoreSnapshotMetrics.averageScore),
+        scoreValue: scoreSnapshotMetrics.averageScore,
+        breakdowns: scoreBreakdowns
+      };
+      const totalIssuesCardDefinition = {
+        label: 'Total issues',
+        value: formatNumberValue(scoreSnapshotMetrics.totalIssues),
+        breakdowns: [
+          { label: 'Critical issues', value: formatNumberValue(scoreSnapshotMetrics.criticalIssues) },
+          { label: 'Serious issues', value: formatNumberValue(scoreSnapshotMetrics.seriousIssues) }
+        ]
+      };
+      const pagesWithIssuesCardDefinition = {
+        label: 'Pages with issues',
+        value: formatNumberValue(scoreSnapshotMetrics.pagesWithIssues),
+        breakdowns: [
+          { label: 'Critical pages', value: formatNumberValue(scoreSnapshotMetrics.criticalPages) },
+          { label: 'Serious pages', value: formatNumberValue(scoreSnapshotMetrics.seriousPages) }
+        ]
+      };
+
+      const scoreSnapshotCards = [
+        scansCardDefinition,
+        accessibilityCardDefinition,
+        totalIssuesCardDefinition,
+        pagesWithIssuesCardDefinition
+      ];
+
+      const scoreNoteParts = ['Metrics aggregate the Monitor scans table using the current filters (no Monitor API).'];
+      if (!completeRows.length) {
+        scoreNoteParts.push('Add at least one completed scan to populate score and issue cards.');
+      }
+      if (!completePageRows.length) {
+        scoreNoteParts.push('View-by-Pages data with completed scans populates the page cards.');
+      }
+      const scoreNoteText = scoreNoteParts.join(' ');
+
+  appendSnapshotSection('score', 'Score snapshot', scoreSnapshotCards.slice(0, 2), { noteText: scoreNoteText });
+      appendSnapshotSection('status', 'Scan snapshot', [scansCardDefinition]);
+      appendSnapshotSection('issues', 'Issue snapshot', [scansCardDefinition, totalIssuesCardDefinition]);
+      appendSnapshotSection('pages', 'Pages snapshot', [scansCardDefinition, pagesWithIssuesCardDefinition]);
+      appendSnapshotSection('ranking', 'Ranking snapshot', [scansCardDefinition]);
+    }
+
     // Scan Status summary
     {
       const details = makeDetails('Scan Status');
@@ -14319,113 +14614,6 @@
       }
       details.appendChild(ul);
       pushSection('status', details);
-    }
-
-    // Score snapshot cards
-    {
-      const section = document.createElement('section');
-      section.className = 'a11y-scan-insights-section';
-      const heading = document.createElement('h2');
-      heading.textContent = 'Score snapshot';
-      section.appendChild(heading);
-
-      const note = document.createElement('p');
-      note.className = 'a11y-scan-insights-note';
-      const noteParts = ['Metrics aggregate the Monitor scans table using the current filters (no Monitor API).'];
-      if (!completeRows.length) {
-        noteParts.push('Add at least one completed scan to populate score and issue cards.');
-      }
-      if (!completePageRows.length) {
-        noteParts.push('View-by-Pages data with completed scans populates the page cards.');
-      }
-      note.textContent = noteParts.join(' ');
-      section.appendChild(note);
-
-      const list = document.createElement('ul');
-      list.className = 'a11y-scan-insights-summary-grid a11y-scan-insights-impact-list';
-      list.setAttribute('role','list');
-
-      const scanTypeEntries = Object.entries(scoreSnapshotMetrics.scanCountsByType || {});
-      const prioritizedOrder = ['Desktop','Mobile','PDF'];
-      scanTypeEntries.sort((a, b) => {
-        const [labelA, countA] = a;
-        const [labelB, countB] = b;
-        const priorityA = prioritizedOrder.indexOf(labelA);
-        const priorityB = prioritizedOrder.indexOf(labelB);
-        if (priorityA !== -1 || priorityB !== -1) {
-          if (priorityA === -1) return 1;
-          if (priorityB === -1) return -1;
-          if (priorityA !== priorityB) return priorityA - priorityB;
-        }
-        if (countA !== countB) return countB - countA;
-        return labelA.localeCompare(labelB, undefined, { sensitivity: 'base' });
-      });
-
-      const scanBreakdowns = scanTypeEntries.map(([label, count]) => ({
-        label,
-        value: formatNumberValue(count)
-      }));
-
-      const scoreTypeEntries = Object.entries(scoreSnapshotMetrics.averageScoreByType || {});
-      scoreTypeEntries.sort((a, b) => {
-        const [labelA] = a;
-        const [labelB] = b;
-        const priorityA = prioritizedOrder.indexOf(labelA);
-        const priorityB = prioritizedOrder.indexOf(labelB);
-        if (priorityA !== -1 || priorityB !== -1) {
-          if (priorityA === -1) return 1;
-          if (priorityB === -1) return -1;
-          if (priorityA !== priorityB) return priorityA - priorityB;
-        }
-        return labelA.localeCompare(labelB, undefined, { sensitivity: 'base' });
-      });
-
-      const scoreBreakdowns = scoreTypeEntries.map(([label, avg]) => ({
-        label,
-        value: formatScoreValue(avg),
-        scoreValue: avg
-      }));
-
-      const cardDefinitions = [
-        {
-          label: 'Scans',
-          value: formatNumberValue(scoreSnapshotMetrics.scanCount),
-          breakdowns: scanBreakdowns
-        },
-        {
-          label: 'Accessibility score',
-          value: formatScoreValue(scoreSnapshotMetrics.averageScore),
-          scoreValue: scoreSnapshotMetrics.averageScore,
-          breakdowns: scoreBreakdowns
-        },
-        {
-          label: 'Total issues',
-          value: formatNumberValue(scoreSnapshotMetrics.totalIssues),
-          breakdowns: [
-            { label: 'Critical issues', value: formatNumberValue(scoreSnapshotMetrics.criticalIssues) },
-            { label: 'Serious issues', value: formatNumberValue(scoreSnapshotMetrics.seriousIssues) }
-          ]
-        },
-        {
-          label: 'Pages with issues',
-          value: formatNumberValue(scoreSnapshotMetrics.pagesWithIssues),
-          breakdowns: [
-            { label: 'Critical pages', value: formatNumberValue(scoreSnapshotMetrics.criticalPages) },
-            { label: 'Serious pages', value: formatNumberValue(scoreSnapshotMetrics.seriousPages) }
-          ]
-        }
-      ];
-
-      cardDefinitions.forEach(definition => {
-        const item = document.createElement('li');
-        item.className = 'a11y-scan-insights-impact-item';
-        item.setAttribute('role','listitem');
-        item.appendChild(createStaticImpactSummaryCard(definition));
-        list.appendChild(item);
-      });
-
-      section.appendChild(list);
-      pushSection('score', section);
     }
 
     // Score summary (all scans)
@@ -20298,8 +20486,6 @@
       scanInsightsState.subtitleEl = subtitle;
       updateScanInsightsSubtitle();
     }
-    header.appendChild(left);
-
     const actions = document.createElement('div');
     actions.className = 'a11y-scan-report-header-actions';
     const controlsBar = document.createElement('div');
@@ -20416,7 +20602,8 @@
   actions.appendChild(closeBtn);
   actions.appendChild(minimizeBtn);
 
-    header.appendChild(actions);
+  header.appendChild(actions);
+  header.appendChild(left);
     dialog.appendChild(header);
     dialog.appendChild(body);
     dialog.appendChild(footer);
