@@ -911,6 +911,9 @@
   function buildScanInsightsSection(title, body) {
     const section = document.createElement('section');
     section.className = 'a11y-scan-insights-section';
+    if (title) {
+      section.dataset.sectionTitle = title;
+    }
     const heading = document.createElement('h2');
     heading.textContent = title;
     section.appendChild(heading);
@@ -1139,35 +1142,114 @@
     wrapper.className = 'a11y-download-block';
     const actions = document.createElement('div');
     actions.className = 'a11y-download-actions';
-    const ariaLabel = buildDownloadAriaLabel(sectionTitle, tableIndex);
-    const button = createDownloadButton('Download CSV', () => downloadTableAsCsv(table, filename), { ariaLabel });
+    const contextNode = table.closest('.a11y-scan-insights-section') || parent;
+    const accessibleContext = buildDownloadContextLabel(sectionTitle, tableIndex);
+    const button = createDownloadButton(
+      'Download CSV',
+      () => downloadTableAsCsv(table, filename),
+      { accessibleContext, contextNode }
+    );
     actions.appendChild(button);
     wrapper.appendChild(actions);
     parent.insertBefore(wrapper, table);
     wrapper.appendChild(table);
   }
 
-  // Compose an aria-label that references the visual section title so screen reader users
-  // understand which dataset they are about to export.
-  function buildDownloadAriaLabel(sectionTitle, tableIndex) {
+  function composeButtonAccessibleName(label, context) {
+    const base = (label || '').trim() || 'Download';
+    const suffix = (context || '').trim();
+    return suffix ? `${base} - ${suffix}` : base;
+  }
+
+  function getNearestHeadingText(node) {
+    if (!node) return '';
+    const selectors = 'h1,h2,h3,h4,h5,h6';
+    const visited = new Set();
+    const extractText = el => (el && el.textContent ? el.textContent.trim() : '');
+    const consider = el => {
+      if (!el || visited.has(el)) return '';
+      visited.add(el);
+      const dataTitle = el.dataset?.sectionTitle || el.dataset?.downloadContext;
+      if (dataTitle && dataTitle.trim()) return dataTitle.trim();
+      if (el.matches?.(selectors)) {
+        const text = extractText(el);
+        if (text) return text;
+      }
+      const labelledBy = el.getAttribute?.('aria-labelledby');
+      if (labelledBy) {
+        const ids = labelledBy.split(/\s+/).filter(Boolean);
+        for (const id of ids) {
+          const ref = document.getElementById(id);
+          const text = extractText(ref);
+          if (text) return text;
+        }
+      }
+      if (el.matches?.('details')) {
+        const summaryHeading = el.querySelector('summary ' + selectors);
+        const summaryText = extractText(summaryHeading);
+        if (summaryText) return summaryText;
+      }
+      const descendant = el.querySelector?.(selectors);
+      if (descendant) {
+        const text = extractText(descendant);
+        if (text) return text;
+      }
+      return '';
+    };
+
+    let current = node;
+    while (current) {
+      const direct = consider(current);
+      if (direct) return direct;
+      let previous = current.previousElementSibling;
+      while (previous) {
+        const prevText = consider(previous);
+        if (prevText) return prevText;
+        previous = previous.previousElementSibling;
+      }
+      current = current.parentElement;
+    }
+    return '';
+  }
+
+  function setButtonAccessibleName(button, { label, context, contextNode } = {}) {
+    if (!button) return;
+    const resolvedLabel = (label || button.textContent || button.getAttribute('aria-label') || '').trim() || 'Download';
+    let resolvedContext = (context || '').trim();
+    if (!resolvedContext && contextNode) {
+      resolvedContext = getNearestHeadingText(contextNode);
+    }
+    if (!resolvedContext && button.closest) {
+      resolvedContext = getNearestHeadingText(
+        button.closest('[data-section-title], section, article, details, .a11y-filter-dialog')
+      );
+    }
+    if (!resolvedContext) {
+      resolvedContext = getNearestHeadingText(button.parentElement);
+    }
+    button.setAttribute('aria-label', composeButtonAccessibleName(resolvedLabel, resolvedContext));
+  }
+
+  function buildDownloadContextLabel(sectionTitle, tableIndex) {
     const title = sectionTitle?.trim();
-    const suffix = Number.isInteger(tableIndex) ? `table ${tableIndex + 1}` : null;
-    if (title && suffix) {
-      return `Download ${title} ${suffix} data as CSV`;
-    }
-    if (title) {
-      return `Download ${title} data as CSV`;
-    }
-    return 'Download scan insight table as CSV';
+    const suffix = Number.isInteger(tableIndex) ? `table ${tableIndex + 1}` : '';
+    if (title && suffix) return `${title} ${suffix}`.trim();
+    if (title) return title;
+    if (suffix) return suffix;
+    return '';
   }
 
   // Shared button factory that wraps download logic with basic error handling.
-  function createDownloadButton(label, onClick, { ariaLabel } = {}) {
+  function createDownloadButton(label, onClick, { ariaLabel, accessibleContext, contextNode } = {}) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'a11y-download-button';
     button.textContent = label;
-    button.setAttribute('aria-label', ariaLabel || label);
+    if (ariaLabel) {
+      button.setAttribute('aria-label', ariaLabel);
+    } else {
+      setButtonAccessibleName(button, { label, context: accessibleContext, contextNode });
+    }
     button.addEventListener('click', () => {
       try {
         onClick();
@@ -2369,9 +2451,8 @@
     });
     const meta = deriveImpactMeta(current, previous, preferLower);
     const formattedValue = valueFormatter ? valueFormatter(current) : current;
-    const card = document.createElement('div');
-    card.className = `a11y-scan-insights-impact-card impact-${meta.impact}`;
-    card.setAttribute('aria-label', `${label || 'Metric'} summary`);
+  const card = document.createElement('div');
+  card.className = `a11y-scan-insights-impact-card impact-${meta.impact}`;
     const icon = createImpactArrowIcon(meta.arrow);
     card.appendChild(icon);
     const valueEl = document.createElement('p');
@@ -2424,8 +2505,8 @@
   // Simpler variant of the impact card that omits arrows/changes for static summaries.
   function createStaticImpactSummaryCard(definition = {}) {
     const { label, value, helperText, breakdowns, scoreValue, cardClassName } = definition;
-    const card = document.createElement('div');
-    card.className = 'a11y-scan-insights-impact-card impact-neutral';
+  const card = document.createElement('div');
+  card.className = 'a11y-scan-insights-impact-card impact-neutral';
     if (cardClassName) {
       const extras = Array.isArray(cardClassName)
         ? cardClassName
@@ -2434,7 +2515,6 @@
           : [];
       extras.filter(Boolean).forEach(cls => card.classList.add(cls));
     }
-    card.setAttribute('aria-label', `${label || 'Metric'} summary`);
 
     const valueEl = document.createElement('p');
     valueEl.className = 'a11y-scan-insights-impact-value';
@@ -2554,13 +2634,11 @@
       badge.classList.add('is-neutral');
       return badge;
     }
-    const formatted = formatSignedValue(delta, fractionDigits) + (suffix || '');
-    const arrow = delta > 0 ? '▲' : '▼';
-    badge.textContent = `${arrow} ${formatted}`.trim();
-    const improved = preferLower ? delta < 0 : delta > 0;
-    badge.classList.add(improved ? 'is-positive' : 'is-negative');
-    const trendWord = improved ? 'improvement' : 'regression';
-    badge.setAttribute('aria-label', `${Math.abs(delta).toLocaleString()} change (${trendWord})`);
+  const formatted = formatSignedValue(delta, fractionDigits) + (suffix || '');
+  const arrow = delta > 0 ? '▲' : '▼';
+  badge.textContent = `${arrow} ${formatted}`.trim();
+  const improved = preferLower ? delta < 0 : delta > 0;
+  badge.classList.add(improved ? 'is-positive' : 'is-negative');
     if (showDirectionText) {
       const text = document.createElement('span');
       text.className = 'a11y-scan-insights-delta-direction';
@@ -2641,9 +2719,8 @@
     const tier = (getScoreGradeTier(letter) || 'F').toLowerCase();
     const chip = document.createElement('span');
     const sizeClass = size === 'compact' ? ' grade-size-compact' : '';
-    chip.className = `a11y-score-grade-chip grade-tier-${tier}${sizeClass}`;
-    chip.textContent = letter;
-    chip.setAttribute('aria-label', `Grade ${letter}`);
+  chip.className = `a11y-score-grade-chip grade-tier-${tier}${sizeClass}`;
+  chip.textContent = letter;
     chip.dataset.grade = letter;
     return chip;
   }
@@ -2957,7 +3034,6 @@
   function renderScanInsightsDialog(body, footer) {
     body.innerHTML = '';
     footer.innerHTML = '';
-    body.setAttribute('tabindex','0');
     scanInsightsState.panels = new Map();
     scanInsightsState.tabButtons = [];
 
@@ -4984,20 +5060,20 @@
       line-height: 1.6;
       color: #333;
     }
-    .a11y-scan-report-body[tabindex="0"] {
+    .a11y-tabpanel[tabindex="0"] {
       outline: none;
     }
 
     .a11y-tablist {
       display: flex;
-      flex-wrap: nowrap;
+      flex-wrap: wrap;
       gap: 4px;
       margin-bottom: 6px;
       border-bottom: 1px solid #e0e0e0;
       padding-bottom: 4px;
       width: 100%;
       box-sizing: border-box;
-      overflow-x: auto;
+      overflow-x: hidden;
     }
     .a11y-tablist button {
       position: relative;
@@ -5033,8 +5109,7 @@
     }
     @media (max-width: 720px) {
       .a11y-tablist {
-        flex-wrap: wrap;
-        overflow-x: visible;
+        gap: 6px;
       }
     }
     .a11y-tablist button:focus-visible {
@@ -5339,7 +5414,8 @@
       padding: 0.1rem 0.35rem;
       display: inline-block;
       max-width: 100%;
-      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
     }
     .a11y-quick-actions-select-wrap {
       display: flex;
@@ -5605,8 +5681,8 @@
       grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
     }
     .a11y-scan-insights-summary-grid {
-      display: flex;
-      flex-wrap: wrap;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 0.75rem;
       list-style: none;
       padding: 0;
@@ -5617,26 +5693,21 @@
       list-style: none;
     }
     .a11y-scan-insights-summary-grid > li {
-      flex: 1 1 25%;
-      max-width: 25%;
-      min-width: 220px;
+      min-width: 0;
     }
     @media (max-width: 1280px) {
-      .a11y-scan-insights-summary-grid > li {
-        flex-basis: 33.3333%;
-        max-width: 33.3333%;
+      .a11y-scan-insights-summary-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
       }
     }
     @media (max-width: 960px) {
-      .a11y-scan-insights-summary-grid > li {
-        flex-basis: 50%;
-        max-width: 50%;
+      .a11y-scan-insights-summary-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
       }
     }
     @media (max-width: 640px) {
-      .a11y-scan-insights-summary-grid > li {
-        flex-basis: 100%;
-        max-width: 100%;
+      .a11y-scan-insights-summary-grid {
+        grid-template-columns: repeat(1, minmax(0, 1fr));
       }
     }
     .a11y-scan-insights-impact-card {
@@ -5967,18 +6038,23 @@
     }
     .a11y-scan-insights-table {
       width: 100%;
+      max-width: 100%;
       border-collapse: collapse;
       font-size: 0.92rem;
       background: #fff;
       border: 1px solid rgba(148,163,184,0.4);
       border-radius: 10px;
       overflow: hidden;
+      table-layout: fixed;
     }
     .a11y-scan-insights-table th,
     .a11y-scan-insights-table td {
       padding: 0.5rem 0.75rem;
       border-bottom: 1px solid rgba(226,232,240,0.8);
       text-align: left;
+      white-space: normal;
+      word-break: break-word;
+      overflow-wrap: anywhere;
     }
     .a11y-scan-insights-table thead th {
       background: #f1f5f9;
@@ -5999,8 +6075,9 @@
     }
     .a11y-sort-button {
       display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.3rem;
       width: 100%;
       padding: 0.45rem 0.75rem;
       border: none;
@@ -6018,13 +6095,17 @@
     .a11y-sort-button .a11y-sort-label {
       flex: 1;
       min-width: 0;
+      width: 100%;
     }
     .a11y-sort-indicator {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 1.5rem;
-      height: 1.5rem;
+      align-self: flex-start;
+      width: auto;
+      min-width: 1.5rem;
+      height: auto;
+      padding: 0.2rem 0.5rem;
       border-radius: 999px;
       background: rgba(15, 23, 42, 0.08);
       font-size: 0.65rem;
@@ -6181,15 +6262,14 @@
     }
     .a11y-scan-insights-line {
       display: grid;
-      grid-template-columns: minmax(280px, 1fr);
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
       gap: 0.75rem 1rem;
       align-items: start;
-      overflow-x: auto;
     }
     .a11y-scan-insights-line-chart {
       width: 100%;
       max-width: 100%;
-      min-width: 300px;
+      min-width: 0;
       border: 1px solid rgba(148,163,184,0.4);
       border-radius: 10px;
       background: #fff;
@@ -6631,7 +6711,7 @@
       background-color: #fafafa;
     }
 
-    .a11y-scan-report-body details > *:not(summary) {
+    .a11y-scan-report-body details > *:not(summary):not(.a11y-table-container) {
       margin-left: 18px;
     }
 
@@ -6694,8 +6774,11 @@
 
     .a11y-table-container {
       width: 100%;
-      overflow-x: auto;
       margin: 4px 0 8px;
+    }
+    .a11y-table-container table {
+      width: 100%;
+      max-width: 100%;
     }
     .a11y-table-toolbar {
       display: flex;
@@ -9622,9 +9705,8 @@
     const range = spec.rangeLabel || formatScoreBucketRange(spec);
     const tier = (getScoreGradeTier(letter) || 'F').toLowerCase();
     const chip = document.createElement('span');
-    chip.className = `a11y-score-grade-chip grade-tier-${tier}`;
-    chip.textContent = range ? `${letter} • ${range}` : letter;
-    chip.setAttribute('aria-label', range ? `Grade ${letter} (${range})` : `Grade ${letter}`);
+  chip.className = `a11y-score-grade-chip grade-tier-${tier}`;
+  chip.textContent = range ? `${letter} • ${range}` : letter;
     chip.dataset.grade = letter;
     return chip;
   }
@@ -13426,7 +13508,20 @@
     return success;
   }
 
-  function appendTableWithDownload(target, table, { filenameBase, buttonLabel } = {}) {
+  function resolveDownloadContext(target, table, explicitContext) {
+    if (explicitContext && explicitContext.trim()) return explicitContext.trim();
+    if (target?.dataset?.downloadContext) {
+      const value = target.dataset.downloadContext.trim();
+      if (value) return value;
+    }
+    const headingFromTarget = getNearestHeadingText(target);
+    if (headingFromTarget) return headingFromTarget;
+    const caption = table?.caption?.textContent?.trim();
+    if (caption) return caption;
+    return '';
+  }
+
+  function appendTableWithDownload(target, table, { filenameBase, buttonLabel, accessibleContext } = {}) {
     if (!table || !target) return table;
     makeTableSortable(table);
     if (table.dataset.downloadReady === 'true') {
@@ -13438,10 +13533,12 @@
     container.className = 'a11y-table-container';
     const toolbar = document.createElement('div');
     toolbar.className = 'a11y-table-toolbar';
+    const resolvedContext = resolveDownloadContext(target, table, accessibleContext);
+    const downloadLabel = buttonLabel || 'Download CSV';
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'a11y-table-download-btn';
-    btn.textContent = buttonLabel || 'Download CSV';
+    btn.textContent = downloadLabel;
     btn.addEventListener('click', () => {
       try {
         const csv = tableToCsv(table);
@@ -13452,6 +13549,7 @@
         alert('Unable to download CSV.');
       }
     });
+    setButtonAccessibleName(btn, { label: downloadLabel, context: resolvedContext, contextNode: target });
     toolbar.appendChild(btn);
     container.appendChild(toolbar);
     container.appendChild(table);
@@ -13551,6 +13649,7 @@
         alert('Unable to download band data.');
       }
     });
+    setButtonAccessibleName(btn, { label: btn.textContent, contextNode: target });
     toolbar.appendChild(btn);
     target.appendChild(toolbar);
   }
@@ -14093,10 +14192,9 @@
       const option = pageImpactSourceOptions.find(entry => entry.key === sourceKey);
       if (!option) return null;
       const text = option.shortLabel || option.label || sourceKey;
-      const span = document.createElement('span');
-      span.className = 'a11y-source-chip';
-      span.textContent = text;
-      span.setAttribute('aria-label', `Source: ${option.label || text}`);
+  const span = document.createElement('span');
+  span.className = 'a11y-source-chip';
+  span.textContent = text;
       span.style.display = 'inline-flex';
       span.style.alignItems = 'center';
       span.style.fontSize = '12px';
@@ -14123,8 +14221,7 @@
       chip.style.color = '#9a3412';
       chip.style.pointerEvents = 'none';
       chip.style.cursor = 'default';
-      chip.dataset.status = 'missing';
-      chip.setAttribute('aria-label', `API data missing for ${coverage.missing} of ${coverage.total} scans.`);
+  chip.dataset.status = 'missing';
       renderMonitorApiChipContent(chip, 'API data • missing', { interactive: false });
       return chip;
     };
@@ -14153,7 +14250,6 @@
 
     closePageImpactFilterPopover({ focusButton: false });
     body.innerHTML = '';
-    body.setAttribute('tabindex','0');
     pageImpactFilterState.button = null;
     pageImpactFilterState.summaryEl = null;
     pageImpactFilterState.apiContainer = null;
@@ -15824,6 +15920,7 @@
             await exportExcelWorkbook(panelExports, { filenameBase: `${panel.dataset.tabKey || 'tab'}-data` });
           } catch (err) {
             console.error(err);
+        setButtonAccessibleName(dlBtn, { label: dlBtn.textContent, contextNode: details });
             alert(err?.message || 'Unable to export Excel data.');
           } finally {
             excelBtn.disabled = false;
@@ -16163,6 +16260,7 @@
     downloadBtn.className = 'a11y-table-download-btn';
     downloadBtn.textContent = 'Download CSV';
     downloadBtn.addEventListener('click', () => downloadPageHealthCsv(rows));
+  setButtonAccessibleName(downloadBtn, { contextNode: container });
     toolbar.appendChild(downloadBtn);
     container.appendChild(toolbar);
 
@@ -17252,6 +17350,7 @@
             alert('Unable to export CSV.');
           }
         });
+        setButtonAccessibleName(btn, { label: btn.textContent, contextNode: target });
         toolbar.appendChild(btn);
         target.appendChild(toolbar);
       }
@@ -17742,6 +17841,7 @@
     const manualResultsWrap = document.createElement('div');
     manualResultsWrap.className = 'a11y-pdf-results';
     const manualMatchesSection = document.createElement('div');
+  manualMatchesSection.dataset.sectionTitle = 'Matches';
     const manualMatchesTitle = document.createElement('h3');
     manualMatchesTitle.textContent = 'Matches (0)';
     manualMatchesSection.appendChild(manualMatchesTitle);
@@ -17758,6 +17858,8 @@
     manualMatchesCopyBtn.className = 'a11y-table-download-btn';
     manualMatchesCopyBtn.textContent = 'Copy URLs';
     manualMatchesCopyBtn.disabled = true;
+  setButtonAccessibleName(manualMatchesCsvBtn, { contextNode: manualMatchesSection });
+  setButtonAccessibleName(manualMatchesCopyBtn, { label: manualMatchesCopyBtn.textContent, contextNode: manualMatchesSection });
     manualMatchesToolbar.appendChild(manualMatchesCopyBtn);
     manualMatchesSection.appendChild(manualMatchesToolbar);
     const manualMatchesTableWrap = document.createElement('div');
@@ -17766,6 +17868,7 @@
     manualResultsWrap.appendChild(manualMatchesSection);
 
     const manualUnmatchedSection = document.createElement('div');
+  manualUnmatchedSection.dataset.sectionTitle = 'No Match';
     const manualUnmatchedTitle = document.createElement('h3');
     manualUnmatchedTitle.textContent = 'No Match (0)';
     manualUnmatchedSection.appendChild(manualUnmatchedTitle);
@@ -17781,8 +17884,9 @@
     manualUnmatchedCopyBtn.type = 'button';
     manualUnmatchedCopyBtn.className = 'a11y-table-download-btn';
     manualUnmatchedCopyBtn.textContent = 'Copy URLs';
-    manualUnmatchedCopyBtn.setAttribute('aria-label','Copy unmatched entries to clipboard');
     manualUnmatchedCopyBtn.disabled = true;
+  setButtonAccessibleName(manualUnmatchedCsvBtn, { contextNode: manualUnmatchedSection });
+  setButtonAccessibleName(manualUnmatchedCopyBtn, { label: manualUnmatchedCopyBtn.textContent, contextNode: manualUnmatchedSection });
     manualUnmatchedToolbar.appendChild(manualUnmatchedCopyBtn);
     manualUnmatchedSection.appendChild(manualUnmatchedToolbar);
     const manualUnmatchedTableWrap = document.createElement('div');
