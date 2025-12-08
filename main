@@ -31,6 +31,17 @@
     runHistoryScrapePromise: null
   };
 
+  const printShareFlowState = {
+    structure: null,
+    currentHtml: '',
+    lastSelection: null,
+    selectionDialog: null,
+    previewDialog: null,
+    lastTrigger: null,
+    previewContentEl: null
+  };
+  let printShareSectionIdCounter = 0;
+
   const runPageSummaryCache = new Map();
   const runPageSummaryConcurrency = 1;
   const scanInsightsDebugState = {
@@ -3194,6 +3205,8 @@
     } else {
       renderScanInsightsHealthTab(target, scanInsightsState.data);
     }
+
+    captureScanInsightsPrintShareStructureSnapshot();
   }
 
   // Builds the minimal context object used throughout insights requests,
@@ -6971,6 +6984,130 @@
       padding: 18px 24px 14px;
     }
 
+    .a11y-print-share-btn {
+      padding: 5px 12px;
+      font-size: 12px;
+      border-radius: 4px;
+      border: 1px solid #c4c4c4;
+      background: #ffffff;
+      color: #333;
+      cursor: pointer;
+    }
+    .a11y-print-share-btn:hover {
+      background: #f5f5f5;
+    }
+
+    .a11y-print-share-content {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-height: 60vh;
+      overflow: auto;
+    }
+
+    .a11y-print-share-selection {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .a11y-print-share-tab {
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 12px;
+      background: #f8fafc;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .a11y-print-share-tab-checkbox {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+      font-size: 14px;
+    }
+    .a11y-print-share-tab-checkbox input {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+    }
+
+    .a11y-print-share-headings {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding-left: 20px;
+    }
+
+    .a11y-print-share-heading-checkbox {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+    }
+    .a11y-print-share-heading-checkbox input {
+      width: 14px;
+      height: 14px;
+      margin: 0;
+    }
+    .a11y-print-share-heading-checkbox input:disabled + span {
+      color: #94a3b8;
+    }
+
+    .a11y-print-share-empty {
+      font-size: 13px;
+      color: #475569;
+      margin: 4px 0 0;
+    }
+
+    .a11y-print-share-intro {
+      margin: 0;
+      font-size: 13px;
+      color: #475569;
+    }
+
+    .a11y-print-share-dialog--large {
+      width: min(96vw, 960px);
+      max-height: 85vh;
+    }
+
+    .a11y-print-share-preview-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .a11y-print-share-preview {
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 16px;
+      background: #ffffff;
+      max-height: 50vh;
+      overflow: auto;
+      line-height: 1.5;
+      font-size: 14px;
+      color: #111;
+    }
+    .a11y-print-share-preview h1,
+    .a11y-print-share-preview h2,
+    .a11y-print-share-preview h3 {
+      margin-top: 1.2em;
+    }
+
+    .a11y-print-share-notice {
+      min-height: 20px;
+      font-size: 13px;
+      color: #0f172a;
+    }
+
+    .a11y-print-share-meta {
+      font-size: 13px;
+      color: #475569;
+      margin-top: -4px;
+    }
+
     .a11y-ranking-dialog {
       width: 640px;
       max-width: min(720px, 95vw);
@@ -10255,6 +10392,810 @@
     } else {
       parent.appendChild(overlay);
     }
+  }
+
+  // --- Print/share flow ---
+
+  function capturePrintShareStructureSnapshot({ tabs, impactSummary, impactDescriptor, generatedAt, filtersSummary } = {}) {
+    if (!Array.isArray(tabs) || !tabs.length) {
+      clearPrintShareStructureSnapshot();
+      return;
+    }
+    const snapshotTabs = tabs.map(tab => {
+      const sections = (tab.sections || []).map((section, index) => {
+        if (!(section instanceof HTMLElement)) return null;
+        const id = section.dataset.printShareSectionId || generatePrintShareSectionId(tab.key, index);
+        section.dataset.printShareSectionId = id;
+        const label = extractPrintShareSectionTitle(section, `Section ${index + 1}`);
+        return { id, label, node: section };
+      }).filter(Boolean);
+      return {
+        key: tab.key,
+        label: tab.label,
+        sections
+      };
+    });
+    printShareFlowState.structure = {
+      tabs: snapshotTabs,
+      generatedAt: generatedAt || new Date(),
+      meta: {
+        filtersSummary: typeof filtersSummary === 'string' ? filtersSummary : buildPrintShareFiltersSummary(),
+        impactSummary: impactSummary || '',
+        impactDescriptor: impactDescriptor || ''
+      },
+      title: getPrintShareReportTitle()
+    };
+  }
+
+  function captureScanInsightsPrintShareStructureSnapshot() {
+    if (modalContext?.mode !== 'scanInsights') return;
+    if (!scanInsightsState?.panels || !scanInsightsState.panels.size) return;
+    const tabs = scanInsightsTabs.map(tab => {
+      const panel = scanInsightsState.panels.get(tab.key);
+      const sections = derivePrintShareSectionsFromPanel(panel, tab.label || tab.key);
+      return {
+        key: tab.key,
+        label: tab.label,
+        sections
+      };
+    }).filter(Boolean);
+    if (!tabs.some(entry => entry.sections?.length)) return;
+    const meta = buildScanInsightsPrintShareMeta();
+    capturePrintShareStructureSnapshot({
+      tabs,
+      impactSummary: meta.summary,
+      impactDescriptor: meta.detail,
+      filtersSummary: ''
+    });
+  }
+
+  function derivePrintShareSectionsFromPanel(panel, fallbackLabel) {
+    if (!panel) return [];
+    const baseLabel = fallbackLabel || 'Section';
+    const tabKey = panel.dataset.tabKey || 'insights';
+    const selector = '.a11y-scan-insights-section, section, article, details';
+    const seenNodes = new Set();
+    const sections = [];
+
+    const addSection = (node, index, fallbackText) => {
+      if (!(node instanceof HTMLElement) || seenNodes.has(node)) return;
+      seenNodes.add(node);
+      const id = node.dataset.printShareSectionId || generatePrintShareSectionId(tabKey, index ?? sections.length);
+      node.dataset.printShareSectionId = id;
+      const fallback = fallbackText || `${baseLabel} section ${sections.length + 1}`;
+      const label = extractPrintShareSectionTitle(node, fallback);
+      sections.push({ id, label, node });
+    };
+
+    const pickTopLevelNodes = nodes =>
+      nodes.filter(node => {
+        let ancestor = node.parentElement;
+        while (ancestor && ancestor !== panel) {
+          if (ancestor.matches(selector)) return false;
+          ancestor = ancestor.parentElement;
+        }
+        return true;
+      });
+
+    const explicitNodes = pickTopLevelNodes(Array.from(panel.querySelectorAll(selector)));
+    if (explicitNodes.length) {
+      explicitNodes.forEach((node, index) => addSection(node, index));
+    } else {
+      const fallbackNodes = Array.from(panel.children).filter(child => child instanceof HTMLElement);
+      fallbackNodes.forEach((node, index) => addSection(node, index));
+    }
+
+    if (!sections.length) {
+      const headingSelector = 'h1, h2, h3, h4, h5, h6, [role="heading"]';
+      const headingNodes = Array.from(panel.querySelectorAll(headingSelector)).filter(node => {
+        const text = node.textContent?.trim();
+        return Boolean(text);
+      });
+      headingNodes.forEach((heading, index) => {
+        let container = heading.closest(selector);
+        if (!container) {
+          container = heading.closest('section, article, details');
+        }
+        if (!container) {
+          container = heading.parentElement || heading;
+        }
+        let topLevel = container;
+        while (topLevel && topLevel.parentElement && topLevel.parentElement !== panel) {
+          if (topLevel.parentElement.matches(selector)) {
+            topLevel = topLevel.parentElement;
+          } else {
+            break;
+          }
+        }
+        addSection(topLevel || heading, sections.length + index, heading.textContent?.trim());
+      });
+    }
+
+    if (!sections.length) {
+      const id = panel.dataset.printSharePanelId || generatePrintShareSectionId(tabKey, 0);
+      panel.dataset.printSharePanelId = id;
+      sections.push({ id, label: `${baseLabel} content`, node: panel });
+    }
+
+    return sections;
+  }
+
+  function buildScanInsightsPrintShareMeta() {
+    const context = scanInsightsState?.context || {};
+    const scanName = context.scanName || getScanBreadcrumbName();
+    const summary = scanName ? `${scanName} insights` : 'Scan insights';
+    const runLabel = context.runNumber != null ? `Run ${context.runNumber}` : 'Latest run';
+    const detail = context.scanId ? `Scan ${context.scanId} • ${runLabel}` : runLabel;
+    return { summary, detail };
+  }
+
+  function clearPrintShareStructureSnapshot() {
+    printShareFlowState.structure = null;
+  }
+
+  function getPrintShareStructureSnapshot() {
+    return printShareFlowState.structure;
+  }
+
+  function generatePrintShareSectionId(tabKey, index) {
+    const key = tabKey || 'tab';
+    printShareSectionIdCounter += 1;
+    return `print-share-section-${key}-${index}-${printShareSectionIdCounter}`;
+  }
+
+  function extractPrintShareSectionTitle(section, fallback) {
+    if (!section) return fallback || 'Section';
+    const datasetTitle = section.dataset?.sectionTitle?.trim();
+    if (datasetTitle) return datasetTitle;
+    const ariaLabel = section.getAttribute?.('aria-label')?.trim();
+    if (ariaLabel) return ariaLabel;
+    const labelledById = section.getAttribute?.('aria-labelledby');
+    if (labelledById) {
+      const labelledNode = document.getElementById(labelledById);
+      const labelledText = labelledNode?.textContent?.trim();
+      if (labelledText) return labelledText;
+    }
+    const heading =
+      section.querySelector('summary h2, summary h3, summary h4') ||
+      section.querySelector('h2, h3, h4');
+    const text = heading?.textContent?.trim();
+    return text || fallback || 'Section';
+  }
+
+  function buildPrintShareFiltersSummary() {
+    if (!currentFilters) return '';
+    const parts = [];
+    const appendSet = (label, set) => {
+      if (!set?.size) return;
+      const values = Array.from(set).map(value => String(value)).join(', ');
+      parts.push(`${label}: ${values}`);
+    };
+    appendSet('Types', currentFilters.types);
+    appendSet('Statuses', currentFilters.statuses);
+    appendSet('Domains', currentFilters.domains);
+    return parts.join(' • ');
+  }
+
+  function openPrintShareSelectionDialog({ trigger } = {}) {
+    printShareFlowState.lastTrigger = trigger || document.activeElement;
+    const currentMode = modalContext?.mode || pageContext;
+    if (currentMode !== 'scans' && currentMode !== 'scanInsights') {
+      alert('Open the Scan Summary or Scan Insights dialog to access the print/share view.');
+      return;
+    }
+    const structure = getPrintShareStructureSnapshot();
+    if (!structure?.tabs?.length) {
+      alert('Report content is still loading. Try again in a moment.');
+      return;
+    }
+    if (printShareFlowState.selectionDialog?.close) {
+      printShareFlowState.selectionDialog.close('replace');
+    }
+    const dialog = createPrintShareDialog({
+      title: 'Print/Share friendly version',
+      trigger: printShareFlowState.lastTrigger,
+      onClose: () => {
+        if (printShareFlowState.selectionDialog === dialog) {
+          printShareFlowState.selectionDialog = null;
+        }
+      }
+    });
+    printShareFlowState.selectionDialog = dialog;
+
+    const intro = document.createElement('p');
+    intro.className = 'a11y-print-share-intro';
+    intro.textContent = 'Choose the tabs and headings to include. Tabs control the top-level sections; headings narrow the content further.';
+    dialog.body.appendChild(intro);
+
+    const selectionTree = buildPrintShareSelectionTree(structure);
+    dialog.body.appendChild(selectionTree);
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'a11y-btn-secondary';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', () => dialog.close('cancel'));
+
+    const okBtn = document.createElement('button');
+    okBtn.type = 'button';
+    okBtn.className = 'a11y-btn-primary';
+    okBtn.textContent = 'OK';
+    okBtn.addEventListener('click', () => {
+      const selectionModel = collectPrintShareSelection(selectionTree, structure);
+      if (!selectionModel.length) {
+        alert('Select at least one tab to continue.');
+        return;
+      }
+      printShareFlowState.lastSelection = selectionModel;
+      let htmlString = '';
+      try {
+        htmlString = buildPrintShareHtml(selectionModel);
+      } catch (err) {
+        console.error('[PrintShare] Unable to build HTML', err);
+        alert(err?.message || 'Unable to build print/share version.');
+        return;
+      }
+      dialog.close('confirm');
+      openPrintSharePreviewDialog(htmlString, { trigger: printShareFlowState.lastTrigger });
+    });
+
+    dialog.footer.appendChild(cancelBtn);
+    dialog.footer.appendChild(okBtn);
+  }
+
+  function buildPrintShareSelectionTree(structure) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'a11y-print-share-selection';
+    structure.tabs.forEach(tab => {
+      const section = document.createElement('section');
+      section.className = 'a11y-print-share-tab';
+
+      const tabId = `print-share-tab-${tab.key}`;
+      const tabLabel = document.createElement('label');
+      tabLabel.className = 'a11y-print-share-tab-checkbox';
+      const tabCheckbox = document.createElement('input');
+      tabCheckbox.type = 'checkbox';
+      tabCheckbox.id = tabId;
+      tabCheckbox.checked = true;
+      tabCheckbox.dataset.tabCheckbox = 'true';
+      tabCheckbox.dataset.tabLabel = tab.label || tab.key;
+      tabCheckbox.value = tab.key;
+      tabLabel.appendChild(tabCheckbox);
+      const tabText = document.createElement('span');
+      tabText.textContent = tab.label || tab.key;
+      tabLabel.appendChild(tabText);
+      section.appendChild(tabLabel);
+
+      const headingsWrap = document.createElement('div');
+      headingsWrap.className = 'a11y-print-share-headings';
+      headingsWrap.setAttribute('role','group');
+      headingsWrap.setAttribute('aria-labelledby', tabId);
+      if (!tab.sections.length) {
+        const empty = document.createElement('p');
+        empty.className = 'a11y-print-share-empty';
+        empty.textContent = 'No headings detected for this tab.';
+        headingsWrap.appendChild(empty);
+      } else {
+        tab.sections.forEach(sectionMeta => {
+          const headingLabel = document.createElement('label');
+          headingLabel.className = 'a11y-print-share-heading-checkbox';
+          const input = document.createElement('input');
+          input.type = 'checkbox';
+          input.checked = true;
+          input.dataset.headingCheckbox = 'true';
+          input.dataset.tabKey = tab.key;
+          input.value = sectionMeta.id;
+          headingLabel.appendChild(input);
+          const span = document.createElement('span');
+          span.textContent = sectionMeta.label;
+          headingLabel.appendChild(span);
+          headingsWrap.appendChild(headingLabel);
+        });
+      }
+      section.appendChild(headingsWrap);
+      wrapper.appendChild(section);
+    });
+
+    wrapper.addEventListener('change', event => {
+      const target = event.target;
+      if (!target.matches('[data-tab-checkbox]')) return;
+      const tabKey = target.value;
+      const selector = `[data-heading-checkbox][data-tab-key="${printShareEscapeSelector(tabKey)}"]`;
+      const headingBoxes = wrapper.querySelectorAll(selector);
+      headingBoxes.forEach(cb => {
+        cb.checked = target.checked;
+        cb.disabled = !target.checked;
+      });
+    });
+
+    return wrapper;
+  }
+
+  function collectPrintShareSelection(root, structure) {
+    if (!root) return [];
+    const selection = [];
+    const tabsByKey = new Map(structure.tabs.map(tab => [tab.key, tab]));
+    const tabCheckboxes = root.querySelectorAll('[data-tab-checkbox]');
+    tabCheckboxes.forEach(tabCheckbox => {
+      if (!tabCheckbox.checked) return;
+      const tabKey = tabCheckbox.value;
+      const tabMeta = tabsByKey.get(tabKey);
+      const selector = `[data-heading-checkbox][data-tab-key="${printShareEscapeSelector(tabKey)}"]`;
+      const headingBoxes = Array.from(root.querySelectorAll(selector)).filter(cb => !cb.disabled);
+      const checkedHeadings = headingBoxes.filter(cb => cb.checked).map(cb => cb.value);
+      const includeAll = !headingBoxes.length || checkedHeadings.length === headingBoxes.length;
+      selection.push({
+        tabKey,
+        tabLabel: tabMeta?.label || tabCheckbox.dataset.tabLabel || tabKey,
+        includeAllHeadings: includeAll,
+        headingIds: includeAll ? [] : checkedHeadings
+      });
+    });
+    return selection;
+  }
+
+  function printShareEscapeSelector(value) {
+    if (typeof window !== 'undefined' && window.CSS && typeof window.CSS.escape === 'function') {
+      return window.CSS.escape(value);
+    }
+    return String(value || '').replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+  }
+
+  function createPrintShareDialog({ title, size = 'medium', trigger, onClose } = {}) {
+    const overlay = document.createElement('div');
+    overlay.className = 'a11y-filter-overlay a11y-print-share-overlay';
+    const dialog = document.createElement('div');
+    dialog.className = 'a11y-filter-dialog a11y-print-share-dialog';
+    if (size === 'large') {
+      dialog.classList.add('a11y-print-share-dialog--large');
+    }
+    const titleId = `print-share-dialog-title-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    dialog.setAttribute('role','dialog');
+    dialog.setAttribute('aria-modal','true');
+    dialog.setAttribute('aria-labelledby', titleId);
+
+    const header = document.createElement('div');
+    header.className = 'a11y-filter-header';
+    const h2 = document.createElement('h2');
+    h2.id = titleId;
+    h2.setAttribute('tabindex','-1');
+    h2.textContent = title;
+    header.appendChild(h2);
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'Dialog__close';
+    closeBtn.innerHTML = '<span aria-hidden="true" class="Icon Icon--close"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" height="24" width="24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="currentColor"></path></svg></span><span class="Offscreen">Close</span>';
+    header.appendChild(closeBtn);
+    dialog.appendChild(header);
+
+    const body = document.createElement('div');
+    body.className = 'a11y-filter-content a11y-print-share-content';
+    dialog.appendChild(body);
+
+    const footer = document.createElement('div');
+    footer.className = 'a11y-filter-footer a11y-print-share-footer';
+    dialog.appendChild(footer);
+
+    overlay.appendChild(dialog);
+    appendOverlayAfterFooter(overlay);
+
+    const lastFocused = trigger || document.activeElement;
+
+    function close(reason) {
+      document.removeEventListener('keydown', onKeydown, true);
+      overlay.remove();
+      if (typeof onClose === 'function') {
+        try {
+          onClose(reason);
+        } catch (err) {
+          console.error('[PrintShare] onClose error', err);
+        }
+      }
+      if (lastFocused && typeof lastFocused.focus === 'function') {
+        lastFocused.focus();
+      }
+    }
+
+    function onKeydown(event) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        close('escape');
+        return;
+      }
+      if (event.key === 'Tab') {
+        const focusable = getFocusable(dialog);
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    }
+
+    document.addEventListener('keydown', onKeydown, true);
+    closeBtn.addEventListener('click', () => close('close'));
+    overlay.addEventListener('click', event => {
+      if (event.target === overlay) close('overlay');
+    });
+
+    setTimeout(() => h2.focus(), 0);
+
+    dialog.close = close;
+    return { element: dialog, body, footer, close };
+  }
+
+  function buildPrintShareHtml(selectionModel) {
+    if (!Array.isArray(selectionModel) || !selectionModel.length) {
+      throw new Error('Select at least one tab to build the printable version.');
+    }
+    const structure = getPrintShareStructureSnapshot();
+    if (!structure?.tabs?.length) {
+      throw new Error('Report content is no longer available. Reopen the selection dialog.');
+    }
+    const root = document.createElement('div');
+    root.className = 'a11y-print-share-fragment';
+
+    const titleText = structure.title || getPrintShareReportTitle();
+    if (titleText) {
+      const titleEl = document.createElement('h1');
+      titleEl.textContent = titleText;
+      root.appendChild(titleEl);
+    }
+
+    const timestamp = structure.generatedAt || new Date();
+    const timestampLabel = typeof formatDateTimeLabel === 'function'
+      ? formatDateTimeLabel(timestamp)
+      : timestamp.toLocaleString();
+    const metaParts = [];
+    if (timestampLabel) metaParts.push(`Generated ${timestampLabel}`);
+    if (structure.meta?.filtersSummary) metaParts.push(`Filters: ${structure.meta.filtersSummary}`);
+    if (structure.meta?.impactDescriptor) metaParts.push(structure.meta.impactDescriptor);
+    if (structure.meta?.impactSummary && !metaParts.includes(structure.meta.impactSummary)) {
+      metaParts.push(structure.meta.impactSummary);
+    }
+    if (metaParts.length) {
+      const meta = document.createElement('p');
+      meta.className = 'a11y-print-share-meta';
+      meta.textContent = metaParts.join(' • ');
+      root.appendChild(meta);
+    }
+
+    selectionModel.forEach(entry => {
+      const tab = structure.tabs.find(tabDef => tabDef.key === entry.tabKey);
+      if (!tab) return;
+      const tabHeading = document.createElement('h2');
+      tabHeading.textContent = entry.tabLabel || tab.label || entry.tabKey;
+      root.appendChild(tabHeading);
+      const sections = entry.includeAllHeadings || !entry.headingIds?.length
+        ? tab.sections
+        : tab.sections.filter(section => entry.headingIds.includes(section.id));
+      if (!sections.length) {
+        const empty = document.createElement('p');
+        empty.textContent = 'No sections selected for this tab.';
+        root.appendChild(empty);
+        return;
+      }
+      sections.forEach(sectionMeta => {
+        const clone = cloneSectionForPrint(sectionMeta.node);
+        if (clone) root.appendChild(clone);
+      });
+    });
+
+    sanitizePrintShareContent(root);
+    printShareFlowState.currentHtml = root.innerHTML;
+    return printShareFlowState.currentHtml;
+  }
+
+  function cloneSectionForPrint(node) {
+    if (!(node instanceof HTMLElement)) return null;
+    const clone = node.cloneNode(true);
+    clone.querySelectorAll('details').forEach(details => { details.open = true; });
+    clone.querySelectorAll('button, input, select, textarea, .a11y-panel-controls, .a11y-panel-toggle-btn, .a11y-table-toolbar, .a11y-was-actions, .a11y-page-health-actions, .a11y-page-health-filter').forEach(el => el.remove());
+    clone.querySelectorAll('[role="button"]').forEach(el => el.removeAttribute('role'));
+    return clone;
+  }
+
+  function sanitizePrintShareContent(root) {
+    if (!root) return;
+    root.querySelectorAll('[hidden]').forEach(el => el.removeAttribute('hidden'));
+    root.querySelectorAll('[aria-expanded]').forEach(el => el.removeAttribute('aria-expanded'));
+    root.querySelectorAll('[data-print-share-section-id]').forEach(el => el.removeAttribute('data-print-share-section-id'));
+  }
+
+  function openPrintSharePreviewDialog(htmlString, { trigger } = {}) {
+    if (!htmlString) {
+      alert('Preview content is empty.');
+      return;
+    }
+    if (printShareFlowState.previewDialog?.close) {
+      printShareFlowState.previewDialog.close('replace');
+    }
+    const dialog = createPrintShareDialog({
+      title: 'Print/Share preview',
+      size: 'large',
+      trigger,
+      onClose: () => {
+        if (printShareFlowState.previewDialog === dialog) {
+          printShareFlowState.previewDialog = null;
+        }
+        printShareFlowState.previewContentEl = null;
+      }
+    });
+    printShareFlowState.previewDialog = dialog;
+
+    const notice = document.createElement('div');
+    notice.className = 'a11y-print-share-notice';
+    notice.setAttribute('role','status');
+    notice.setAttribute('aria-live','polite');
+
+    const actions = document.createElement('div');
+    actions.className = 'a11y-print-share-preview-actions';
+    const docxBtn = document.createElement('button');
+    docxBtn.type = 'button';
+    docxBtn.className = 'a11y-btn-secondary';
+    docxBtn.textContent = 'Download .docx';
+    docxBtn.addEventListener('click', () => {
+      try {
+        const emailHtml = getEmailFriendlyHtmlFromPreview();
+        downloadPrintShareDocx(emailHtml);
+        notice.textContent = 'DOCX export is not ready yet. Copy the content or use another option.';
+      } catch (err) {
+        notice.textContent = err?.message || 'DOCX export is not available yet.';
+      }
+    });
+    const pdfBtn = document.createElement('button');
+    pdfBtn.type = 'button';
+    pdfBtn.className = 'a11y-btn-secondary';
+    pdfBtn.textContent = 'Download .pdf';
+    pdfBtn.addEventListener('click', () => {
+      try {
+        const emailHtml = getEmailFriendlyHtmlFromPreview();
+        downloadPrintSharePdf(emailHtml);
+        notice.textContent = 'PDF export is not ready yet. Copy the content or use another option.';
+      } catch (err) {
+        notice.textContent = err?.message || 'PDF export is not available yet.';
+      }
+    });
+    const gmailBtn = document.createElement('button');
+    gmailBtn.type = 'button';
+    gmailBtn.className = 'a11y-btn-primary';
+    gmailBtn.textContent = 'Send to Gmail';
+    gmailBtn.addEventListener('click', async () => {
+      notice.textContent = 'Preparing Gmail compose window…';
+      try {
+        const emailHtml = getEmailFriendlyHtmlFromPreview();
+        await sendReportToGmail(emailHtml);
+        notice.textContent = 'Report copied to clipboard. Gmail opened—paste into the message body.';
+      } catch (err) {
+        console.warn('[PrintShare] Clipboard unavailable', err);
+        notice.textContent = 'Clipboard access was denied. Gmail opened—copy from this preview manually.';
+      }
+    });
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'a11y-btn-secondary';
+    closeBtn.textContent = 'Close';
+    closeBtn.addEventListener('click', () => dialog.close('close'));
+
+    actions.appendChild(docxBtn);
+    actions.appendChild(pdfBtn);
+    actions.appendChild(gmailBtn);
+    actions.appendChild(closeBtn);
+
+    const preview = document.createElement('div');
+    preview.className = 'a11y-print-share-preview';
+    preview.setAttribute('tabindex','0');
+    preview.innerHTML = htmlString;
+    printShareFlowState.previewContentEl = preview;
+
+    dialog.body.appendChild(actions);
+    dialog.body.appendChild(notice);
+    dialog.body.appendChild(preview);
+  }
+
+  function getEmailFriendlyHtmlFromPreview() {
+    const previewEl = printShareFlowState.previewContentEl;
+    if (!previewEl) {
+      throw new Error('Preview content is not ready yet. Build the preview before exporting.');
+    }
+    const clonedPreview = previewEl.cloneNode(true);
+    const sandbox = document.createElement('div');
+    sandbox.style.position = 'fixed';
+    sandbox.style.left = '-9999px';
+    sandbox.style.top = '-9999px';
+    sandbox.style.width = '1px';
+    sandbox.style.height = '1px';
+    sandbox.style.overflow = 'hidden';
+    sandbox.style.opacity = '0';
+    sandbox.setAttribute('aria-hidden','true');
+    sandbox.appendChild(clonedPreview);
+    document.body.appendChild(sandbox);
+    try {
+      simplifyPreviewForEmail(clonedPreview);
+      inlineEmailFriendlyStyles(clonedPreview);
+      return clonedPreview.outerHTML;
+    } finally {
+      sandbox.remove();
+    }
+  }
+
+  function simplifyPreviewForEmail(root) {
+    if (!root) return;
+    stripInteractivePreviewElements(root);
+    convertComplexLayoutsForEmail(root);
+    root.querySelectorAll('script, style').forEach(node => node.remove());
+  }
+
+  function stripInteractivePreviewElements(root) {
+    const selectors = [
+      'button',
+      'input',
+      'select',
+      'textarea',
+      '[role="button"]',
+      '.a11y-panel-controls',
+      '.a11y-panel-toggle-btn',
+      '.a11y-table-toolbar',
+      '.a11y-was-actions',
+      '.a11y-page-health-actions',
+      '.a11y-page-health-filter',
+      '.a11y-page-impact-filter-block',
+      '.TagButton'
+    ];
+    const nodes = root.querySelectorAll(selectors.join(','));
+    nodes.forEach(node => node.remove());
+  }
+
+  function convertComplexLayoutsForEmail(root) {
+    if (!root) return;
+    const candidates = Array.from(root.querySelectorAll('div, section, ul, ol')); // tables handled separately
+    candidates.forEach(node => {
+      if (node.tagName === 'TABLE') return;
+      if (!node.children || !node.children.length) return;
+      if (!shouldConvertElementToTable(node)) return;
+      const table = convertElementToPresentationTable(node);
+      if (table) node.replaceWith(table);
+    });
+  }
+
+  const EMAIL_COMPLEX_CLASS_REGEX = /(grid|card|summary|impact|chip|status|metrics|selection|results|list|preview|section|detail|collection)/i;
+
+  function shouldConvertElementToTable(node) {
+    if (!node) return false;
+    const roleValue = node.getAttribute('role') || '';
+    if (roleValue === 'table') return true;
+    if (roleValue === 'list' || roleValue === 'group') return true;
+    const className = node.className || '';
+    if (className && EMAIL_COMPLEX_CLASS_REGEX.test(className)) return true;
+    if ((node.tagName === 'UL' || node.tagName === 'OL') && className.trim()) return true;
+    const display = window.getComputedStyle(node).display || '';
+    return /grid|flex/i.test(display);
+  }
+
+  function convertElementToPresentationTable(node) {
+    const childElements = Array.from(node.children).filter(child => child.tagName !== 'SCRIPT' && child.tagName !== 'STYLE');
+    if (!childElements.length) return null;
+    const table = document.createElement('table');
+    table.setAttribute('role','presentation');
+    table.setAttribute('cellspacing','0');
+    table.setAttribute('cellpadding','0');
+    const tbody = document.createElement('tbody');
+    childElements.forEach(child => {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.appendChild(child.cloneNode(true));
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    return table;
+  }
+
+  function inlineEmailFriendlyStyles(root) {
+    if (!root) return;
+    const whitelist = [
+      'font-family',
+      'font-size',
+      'font-weight',
+      'font-style',
+      'line-height',
+      'color',
+      'background-color',
+      'text-align',
+      'padding',
+      'padding-top',
+      'padding-right',
+      'padding-bottom',
+      'padding-left',
+      'margin',
+      'margin-top',
+      'margin-right',
+      'margin-bottom',
+      'margin-left',
+      'border',
+      'border-top',
+      'border-right',
+      'border-bottom',
+      'border-left',
+      'list-style-type',
+      'vertical-align',
+      'white-space'
+    ];
+    const elements = [root, ...root.querySelectorAll('*')];
+    elements.forEach(element => {
+      if (element.tagName === 'SCRIPT' || element.tagName === 'STYLE') return;
+      const computed = window.getComputedStyle(element);
+      if (!computed) return;
+      const declarations = [];
+      whitelist.forEach(prop => {
+        const value = computed.getPropertyValue(prop);
+        if (!value) return;
+        const trimmed = value.trim();
+        if (!trimmed) return;
+        declarations.push(`${prop}:${trimmed}`);
+      });
+      if (declarations.length) {
+        const existing = element.getAttribute('style');
+        const next = declarations.join('; ');
+        element.setAttribute('style', existing ? `${existing}; ${next}` : next);
+      }
+    });
+  }
+
+  function downloadPrintShareDocx(htmlString) {
+    console.info('[PrintShare] TODO: Implement DOCX export helper.', { bytes: htmlString?.length || 0 });
+    throw new Error('Download as .docx will be available soon.');
+  }
+
+  function downloadPrintSharePdf(htmlString) {
+    console.info('[PrintShare] TODO: Implement PDF export helper.', { bytes: htmlString?.length || 0 });
+    throw new Error('Download as .pdf will be available soon.');
+  }
+
+  async function sendReportToGmail(htmlString) {
+    if (!htmlString) throw new Error('No report content available.');
+    let clipboardError = null;
+    try {
+      await copyHtmlToClipboard(htmlString);
+    } catch (err) {
+      clipboardError = err || new Error('Clipboard unavailable');
+      console.warn('[PrintShare] Clipboard write failed', err);
+    }
+    openGmailComposeWindow();
+    if (clipboardError) {
+      const error = new Error('Clipboard unavailable');
+      error.code = 'CLIPBOARD_UNAVAILABLE';
+      throw error;
+    }
+  }
+
+  async function copyHtmlToClipboard(htmlString) {
+    if (!navigator?.clipboard || typeof window === 'undefined') {
+      throw new Error('Clipboard API unavailable in this context.');
+    }
+    if (typeof ClipboardItem === 'undefined') {
+      throw new Error('ClipboardItem API unsupported in this browser.');
+    }
+    const blob = new Blob([htmlString], { type: 'text/html' });
+    const item = new ClipboardItem({ 'text/html': blob });
+    await navigator.clipboard.write([item]);
+  }
+
+  function openGmailComposeWindow() {
+    const subject = encodeURIComponent('Accessibility scan report');
+    const url = `https://mail.google.com/mail/?view=cm&fs=1&su=${subject}`;
+    window.open(url, '_blank', 'noopener');
+  }
+
+  function getPrintShareReportTitle() {
+    const heading = document.getElementById('a11y-scan-report-title');
+    const text = heading?.textContent?.trim();
+    return text || 'Accessibility Scan Summary';
   }
 
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -15975,6 +16916,17 @@
     });
 
     if (pageContext === 'scans') {
+      capturePrintShareStructureSnapshot({
+        tabs: visibleTabs,
+        impactSummary: impactHeadingSuffix,
+        impactDescriptor: impactSelectionDescriptor,
+        generatedAt: now
+      });
+    } else {
+      clearPrintShareStructureSnapshot();
+    }
+
+    if (pageContext === 'scans') {
       renderRefreshFooter(footer, now, body, updateFilterButtonLabel);
       if (updateFilterButtonLabel) updateFilterButtonLabel(data);
     } else {
@@ -20685,6 +21637,17 @@
       });
     });
     controlsBar.appendChild(settingsBtn);
+
+    if (isScansDialog || isScanInsightsDialog) {
+      const printShareBtn = document.createElement('button');
+      printShareBtn.type = 'button';
+      printShareBtn.className = 'a11y-btn-secondary a11y-print-share-btn';
+      printShareBtn.textContent = 'Print/Share friendly version';
+      printShareBtn.addEventListener('click', () => {
+        openPrintShareSelectionDialog({ trigger: printShareBtn });
+      });
+      controlsBar.appendChild(printShareBtn);
+    }
 
     const body = document.createElement('div');
     body.className = 'a11y-scan-report-body';
